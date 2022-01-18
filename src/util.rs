@@ -2,8 +2,9 @@
 
 use core::{
     cell::{Cell, RefCell},
-    fmt::{self, Debug, Write},
+    fmt::{self, Debug, Display, Write},
     mem::MaybeUninit,
+    num::NonZeroU64,
     ops::Deref,
     ptr,
 };
@@ -227,6 +228,35 @@ pub(crate) unsafe fn array_assume_init<T, const N: usize>(array: [MaybeUninit<T>
     (&array as *const [_; N]).cast::<[T; N]>().read()
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct AsciiError;
+
+impl Display for AsciiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad("invalid ascii string")
+    }
+}
+
+#[inline]
+pub fn str_from_ascii(buf: &[u8]) -> Result<&str, AsciiError> {
+    if buf.is_ascii() {
+        // Safety: UTF-8 is a superset of ASCII.
+        Ok(unsafe { core::str::from_utf8_unchecked(buf) })
+    } else {
+        Err(AsciiError)
+    }
+}
+
+#[inline]
+pub fn try_ptr_offset(ptr: NonZeroU64, offset: i64) -> Option<NonZeroU64> {
+    NonZeroU64::new(ptr.get().wrapping_add(offset as u64))
+}
+
+#[inline]
+pub fn ptr_offset(ptr: NonZeroU64, offset: i64) -> NonZeroU64 {
+    NonZeroU64::new(ptr.get().wrapping_add(offset as u64)).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,7 +267,10 @@ mod tests {
         buf.write_str("hello,").unwrap();
         buf.write_char(' ').unwrap();
         write!(buf, "num: {:#018X}\nstr: {:?}", 10293, "something").unwrap();
-        assert_eq!(buf.to_str(), "hello, num: 0x0000000000002835\nstr: \"something\"");
+        assert_eq!(
+            buf.to_str(),
+            "hello, num: 0x0000000000002835\nstr: \"something\""
+        );
         let buf2 = buf.clone();
         assert_eq!(buf.to_str(), buf2.to_str());
     }

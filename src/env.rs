@@ -1,6 +1,6 @@
 //! External functions.
 
-use core::num::NonZeroU64;
+use crate::{Address, ProcessId};
 
 pub mod timer_state {
     pub type State = u32;
@@ -20,24 +20,24 @@ extern "C" {
     /// Attaches to a process based on its name.
     pub fn process_attach(name_ptr: *const u8, name_len: usize) -> u64;
     /// Detaches from a process.
-    pub fn process_detach(process: NonZeroU64);
+    pub fn process_detach(process: ProcessId);
     /// Checks whether is a process is still open. You should detach from a
     /// process and stop using it if this returns `false`.
-    pub fn process_is_open(process: NonZeroU64) -> bool;
+    pub fn process_is_open(process: ProcessId) -> bool;
     /// Reads memory from a process at the address given. This will write
     /// the memory to the buffer given. Returns `false` if this fails.
     pub fn process_read(
-        process: NonZeroU64,
-        address: u64,
+        process: ProcessId,
+        address: Address,
         buf_ptr: *mut u8,
         buf_len: usize,
     ) -> bool;
     /// Gets the address of a module in a process.
     pub fn process_get_module(
-        process: NonZeroU64,
+        process: ProcessId,
         name_ptr: *const u8,
         name_len: usize,
-    ) -> Option<NonZeroU64>;
+    ) -> Option<Address>;
 
     /// Sets the tick rate of the runtime. This influences the amount of
     /// times the `update` function is called per second.

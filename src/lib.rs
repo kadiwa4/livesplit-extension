@@ -49,10 +49,11 @@
 #![no_std]
 
 mod env;
+pub mod mem;
 pub mod process;
 pub mod util;
 
-use core::fmt::Arguments;
+use core::{fmt::Arguments, num::NonZeroU64};
 
 pub use process::Process;
 
@@ -233,3 +234,7 @@ macro_rules! println {
         }
     }};
 }
+
+pub type ProcessId = NonZeroU64;
+pub type Address = NonZeroU64;
+pub type Offset = i64;
