@@ -9,11 +9,11 @@ pub mod timer_state {
     pub const NOT_RUNNING: State = 0;
     /// The timer is running.
     pub const RUNNING: State = 1;
-    /// The timer started but got paused. This is separate from the game
-    /// time being paused. Game time may even always be paused.
-    pub const PAUSED: State = 2;
-    // /// The timer has ended, but didn't get reset yet.
-    // pub const ENDED: State = 3;
+    // /// The timer started but got paused. This is separate from the game
+    // /// time being paused. Game time may even always be paused.
+    // pub const PAUSED: State = 2;
+    /// The timer has ended, but didn't get reset yet.
+    pub const ENDED: State = 3;
 }
 
 extern "C" {

@@ -7,6 +7,7 @@ use core::{
     num::NonZeroU64,
     ops::Deref,
     ptr,
+    str::Utf8Error,
 };
 
 /// A mutable memory location.
@@ -54,6 +55,8 @@ impl<T> Deref for SyncRefCell<T> {
 // Safety: No threading.
 unsafe impl<T> Sync for SyncRefCell<T> {}
 
+/// A fixed size buffer that can be written to until it is full. Useful for
+/// formatted strings.
 pub struct WriteBuf<const N: usize> {
     buf: [u8; N],
     pos: usize,
@@ -61,30 +64,41 @@ pub struct WriteBuf<const N: usize> {
 }
 
 impl<const N: usize> WriteBuf<N> {
+    /// Constructs a new empty [`WriteBuf`].
     #[must_use]
     pub fn new() -> Self {
         Self {
             // Safety: This field is private and only the initialized part of
-            // the buf can be extracted through to_str.
+            // the buf can be extracted publicly.
             buf: unsafe { array_assume_init(uninit_array::<u8, N>()) },
             pos: 0,
             full: N == 0,
         }
     }
 
+    /// Returns the string that has been written to the buffer.
     #[inline]
     #[must_use]
-    pub fn to_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         // Safety: Only valid UTF-8 was written to buf and everything up to pos
         // was initialized.
         unsafe { core::str::from_utf8_unchecked(self.buf.get_unchecked(..self.pos)) }
+    }
+
+    /// Returns the string that has been written to the buffer mutably.
+    #[inline]
+    #[must_use]
+    pub fn as_mut_str(&mut self) -> &mut str {
+        // Safety: Only valid UTF-8 was written to buf and everything up to pos
+        // was initialized.
+        unsafe { core::str::from_utf8_unchecked_mut(self.buf.get_unchecked_mut(..self.pos)) }
     }
 }
 
 impl<const N: usize> Clone for WriteBuf<N> {
     fn clone(&self) -> Self {
         let mut buf = Self::new();
-        let _ = buf.write_str(self.to_str());
+        let _ = buf.write_str(self.as_str());
         buf.full = self.full;
         buf
     }
@@ -95,9 +109,10 @@ impl<const N: usize> Debug for WriteBuf<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // This has no generics.
         fn fmt(pos: usize, full: bool, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let mut f = f.debug_struct("WriteBuf");
-            let f = f.field("full", &full);
-            if full { f } else { f.field("len", &pos) }.finish()
+            f.debug_struct("WriteBuf")
+                .field("pos", &pos)
+                .field("full", &full)
+                .finish()
         }
 
         fmt(self.pos, self.full, f)
@@ -126,7 +141,7 @@ impl<const N: usize> Write for WriteBuf<N> {
             }
 
             let count = if s.len() > buf.len() {
-                // buf.len() is always >= 1
+                // buf.len() >= 1, otherwise full would be true.
                 let mut idx = buf.len().wrapping_sub(1);
                 while !s.is_char_boundary(idx) {
                     idx -= 1;
@@ -228,6 +243,75 @@ pub(crate) unsafe fn array_assume_init<T, const N: usize>(array: [MaybeUninit<T>
     (&array as *const [_; N]).cast::<[T; N]>().read()
 }
 
+/// A fixed size array that contains a C string and can be borrowed as a `&str`
+/// using [`as_str`] (for UTF-8 strings) or [`as_ascii_str`].
+///
+/// [`as_ascii_str`]: Self::as_ascii_str
+/// [`as_str`]: Self::as_str
+#[derive(Clone)]
+pub struct StringBuf<const N: usize>(pub [u8; N]);
+
+impl<const N: usize> StringBuf<N> {
+    /// Finds out the length of the contained string and returns it as a string
+    /// slice.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the string is not valid UTF-8 (Unicode).
+    #[inline]
+    pub fn as_str(&self) -> Result<&str, Utf8Error> {
+        core::str::from_utf8(get_c_str_slice(&self.0))
+    }
+
+    /// Finds out the length of the contained string and returns it as a mutable
+    /// string slice.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the string is not valid UTF-8 (Unicode).
+    #[inline]
+    pub fn as_mut_str(&mut self) -> Result<&mut str, Utf8Error> {
+        core::str::from_utf8_mut(get_c_str_slice_mut(&mut self.0))
+    }
+
+    /// Finds out the length of the contained string and returns it as a string
+    /// slice.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the string is not valid ASCII. Checking this is cheaper than
+    /// checking for a valid UTF-8 string.
+    #[inline]
+    pub fn as_ascii_str(&self) -> Result<&str, AsciiError> {
+        str_from_ascii(get_c_str_slice(&self.0))
+    }
+
+    /// Finds out the length of the contained string and returns it as a mutable
+    /// string slice.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the string is not valid ASCII. Checking this is cheaper than
+    /// checking for a valid UTF-8 string.
+    #[inline]
+    pub fn as_mut_ascii_str(&mut self) -> Result<&mut str, AsciiError> {
+        str_from_ascii_mut(get_c_str_slice_mut(&mut self.0))
+    }
+}
+
+impl<const N: usize> Debug for StringBuf<N> {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // This has no generics.
+        fn fmt(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("StringBuf").finish()
+        }
+
+        fmt(f)
+    }
+}
+
+/// The contained characters that are invalid in ASCII strings.
 #[derive(Clone, Copy, Debug)]
 pub struct AsciiError;
 
@@ -237,7 +321,25 @@ impl Display for AsciiError {
     }
 }
 
-#[inline]
+/// Finds the first NUL byte and returns a slice containing everything up to
+/// that.
+#[must_use]
+pub fn get_c_str_slice(buf: &[u8]) -> &[u8] {
+    let len = buf.iter().position(|b| *b == b'\0').unwrap_or(buf.len());
+    // Safety: len <= buf.len().
+    unsafe { buf.get_unchecked(..len) }
+}
+
+/// Finds the first NUL byte and returns a mutable slice containing everything
+/// up to that.
+#[must_use]
+pub fn get_c_str_slice_mut(buf: &mut [u8]) -> &mut [u8] {
+    let len = buf.iter().position(|b| *b == b'\0').unwrap_or(buf.len());
+    // Safety: len <= buf.len().
+    unsafe { buf.get_unchecked_mut(..len) }
+}
+
+/// Same as [`core::str::from_utf8`] except it only accepts ASCII strings.
 pub fn str_from_ascii(buf: &[u8]) -> Result<&str, AsciiError> {
     if buf.is_ascii() {
         // Safety: UTF-8 is a superset of ASCII.
@@ -247,12 +349,31 @@ pub fn str_from_ascii(buf: &[u8]) -> Result<&str, AsciiError> {
     }
 }
 
+/// Same as [`core::str::from_utf8_mut`] except it only accepts ASCII strings.
+pub fn str_from_ascii_mut(buf: &mut [u8]) -> Result<&mut str, AsciiError> {
+    if buf.is_ascii() {
+        // Safety: UTF-8 is a superset of ASCII.
+        Ok(unsafe { core::str::from_utf8_unchecked_mut(buf) })
+    } else {
+        Err(AsciiError)
+    }
+}
+
+/// Adds the offset to the pointer, returning `None` if the result is a
+/// null-pointer.
 #[inline]
-pub fn try_ptr_offset(ptr: NonZeroU64, offset: i64) -> Option<NonZeroU64> {
+#[must_use]
+pub const fn try_ptr_offset(ptr: NonZeroU64, offset: i64) -> Option<NonZeroU64> {
     NonZeroU64::new(ptr.get().wrapping_add(offset as u64))
 }
 
+/// Adds the offset to the pointer.
+///
+/// # Panics
+///
+/// Panics if the result is a null-pointer.
 #[inline]
+#[must_use]
 pub fn ptr_offset(ptr: NonZeroU64, offset: i64) -> NonZeroU64 {
     NonZeroU64::new(ptr.get().wrapping_add(offset as u64)).unwrap()
 }
@@ -268,21 +389,21 @@ mod tests {
         buf.write_char(' ').unwrap();
         write!(buf, "num: {:#018X}\nstr: {:?}", 10293, "something").unwrap();
         assert_eq!(
-            buf.to_str(),
+            buf.as_str(),
             "hello, num: 0x0000000000002835\nstr: \"something\""
         );
         let buf2 = buf.clone();
-        assert_eq!(buf.to_str(), buf2.to_str());
+        assert_eq!(buf.as_str(), buf2.as_str());
     }
 
     #[test]
     fn too_short() {
         let mut buf = WriteBuf::<4>::new();
         buf.write_str("老虎").unwrap_err();
-        assert_eq!(buf.to_str(), "老");
+        assert_eq!(buf.as_str(), "老");
         let mut buf2 = buf.clone();
         buf2.write_char('e').unwrap_err();
-        assert_eq!(buf.to_str(), buf2.to_str());
+        assert_eq!(buf.as_str(), buf2.as_str());
         buf.write_char('e').unwrap_err();
     }
 }

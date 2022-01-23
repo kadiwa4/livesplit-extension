@@ -55,8 +55,6 @@ pub mod util;
 
 use core::{fmt::Arguments, num::NonZeroU64};
 
-pub use process::Process;
-
 use util::SyncCell;
 
 #[cfg(target_arch = "wasm32")]
@@ -121,7 +119,7 @@ pub mod runtime {
 
         let mut buf = WriteBuf::<BUF_LEN>::new();
         let res = fmt::write(&mut buf, args);
-        print_message(buf.to_str());
+        print_message(buf.as_str());
         res
     }
 }
@@ -129,28 +127,31 @@ pub mod runtime {
 pub mod timer {
     use crate::env;
 
-    pub enum TimerState {
-        /// The timer is not running.
-        NotRunning,
-        /// The timer is running.
-        Running,
-        /// The timer started but got paused. This is separate from the game
-        /// time being paused. Game time may even always be paused.
-        Paused,
-        /// The timer has ended, but didn't get reset yet.
-        Ended,
+    /// Describes which phase the timer is currently in. This tells you if
+    /// there's an active speedrun attempt and whether it is paused or it ended.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+    #[repr(u8)]
+    pub enum TimerPhase {
+        /// There's currently no active attempt.
+        NotRunning = 0,
+        /// There's an active attempt that didn't end yet and isn't paused.
+        Running = 1,
+        /// There's an attempt that already ended, but didn't get reset yet.
+        Ended = 2,
+        /// There's an active attempt that is currently paused.
+        Paused = 3,
     }
 
     /// Gets the state that the timer currently is in.
     #[must_use]
-    pub fn get_state() -> TimerState {
-        use {env::timer_state::*, TimerState::*};
+    pub fn get_state() -> TimerPhase {
+        use {env::timer_state::*, TimerPhase::*};
 
         match unsafe { env::timer_get_state() } {
             NOT_RUNNING => NotRunning,
             RUNNING => Running,
-            PAUSED => Paused,
-            _ => Ended,
+            ENDED => Ended,
+            _ => Paused,
         }
     }
 
