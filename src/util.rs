@@ -144,7 +144,7 @@ impl<const N: usize> Write for WriteBuf<N> {
                 // buf.len() >= 1, otherwise full would be true.
                 let mut idx = buf.len().wrapping_sub(1);
                 while !s.is_char_boundary(idx) {
-                    idx -= 1;
+                    idx = idx.wrapping_sub(1);
                 }
 
                 idx
@@ -157,7 +157,7 @@ impl<const N: usize> Write for WriteBuf<N> {
                 ptr::copy_nonoverlapping(s.as_ptr(), buf.as_mut_ptr(), count);
             }
 
-            *pos += count;
+            *pos = pos.wrapping_add(count);
             if *full {
                 Err(fmt::Error)
             } else {
@@ -183,9 +183,9 @@ impl<const N: usize> Write for WriteBuf<N> {
                 *full = true;
             }
 
-            encode_utf8(c as u32, len, buf)?;
+            let _ = char_encode_utf8(c, len, buf);
 
-            *pos += len;
+            *pos = pos.wrapping_add(len);
             if *full {
                 Err(fmt::Error)
             } else {
@@ -199,14 +199,15 @@ impl<const N: usize> Write for WriteBuf<N> {
 
 /// Encodes this character as UTF-8 into the provided byte buffer. Returns an
 /// error if it doesn't fit. Same as [`char::encode_utf8`] except it doesn't
-/// panic. `len` must be equal to `char.len_utf8()` for correct results.
-fn encode_utf8(code: u32, len: usize, dst: &mut [u8]) -> fmt::Result {
+/// panic. `len` must be equal to `c.len_utf8()` for correct results.
+pub fn char_encode_utf8(c: char, len: usize, dst: &mut [u8]) -> fmt::Result {
     // UTF-8 ranges and tags for encoding characters
     const TAG_CONT: u8 = 0b1000_0000;
     const TAG_TWO_B: u8 = 0b1100_0000;
     const TAG_THREE_B: u8 = 0b1110_0000;
     const TAG_FOUR_B: u8 = 0b1111_0000;
 
+    let code = c as u32;
     match (len, dst) {
         (1, [a, ..]) => {
             *a = code as u8;
@@ -232,12 +233,19 @@ fn encode_utf8(code: u32, len: usize, dst: &mut [u8]) -> fmt::Result {
     Ok(())
 }
 
+/// Create a new array of `MaybeUninit<T>` items, in an uninitialized state.
 #[inline]
 pub(crate) fn uninit_array<T, const N: usize>() -> [MaybeUninit<T>; N] {
     // Safety: An uninitialized [MaybeUninit<_>; N] is valid.
     unsafe { MaybeUninit::<[MaybeUninit<T>; N]>::uninit().assume_init() }
 }
 
+/// Extracts the values from an array of `MaybeUninit` containers.
+///
+/// # Safety
+///
+/// It is up to the caller to guarantee that all elements of the array are
+/// in an initialized state.
 #[inline]
 pub(crate) unsafe fn array_assume_init<T, const N: usize>(array: [MaybeUninit<T>; N]) -> [T; N] {
     (&array as *const [_; N]).cast::<[T; N]>().read()
@@ -245,6 +253,8 @@ pub(crate) unsafe fn array_assume_init<T, const N: usize>(array: [MaybeUninit<T>
 
 /// A fixed size array that contains a C string and can be borrowed as a `&str`
 /// using [`as_str`] (for UTF-8 strings) or [`as_ascii_str`].
+///
+/// Useful as the target type of a pointer path.
 ///
 /// [`as_ascii_str`]: Self::as_ascii_str
 /// [`as_str`]: Self::as_str
@@ -312,12 +322,19 @@ impl<const N: usize> Debug for StringBuf<N> {
 }
 
 /// The contained characters that are invalid in ASCII strings.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AsciiError;
 
 impl Display for AsciiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad("invalid ascii string")
+    }
+}
+
+impl From<AsciiError> for crate::Error {
+    #[inline]
+    fn from(err: AsciiError) -> Self {
+        Self::Ascii(err)
     }
 }
 
@@ -375,7 +392,7 @@ pub const fn try_ptr_offset(ptr: NonZeroU64, offset: i64) -> Option<NonZeroU64> 
 #[inline]
 #[must_use]
 pub fn ptr_offset(ptr: NonZeroU64, offset: i64) -> NonZeroU64 {
-    NonZeroU64::new(ptr.get().wrapping_add(offset as u64)).unwrap()
+    NonZeroU64::new(ptr.get().wrapping_add(offset as u64)).expect("offset led to nullptr")
 }
 
 #[cfg(test)]

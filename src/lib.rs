@@ -46,19 +46,40 @@
 //!
 //! [`borrow_mut`]: core::cell::RefCell::borrow_mut
 
-#![no_std]
+#![cfg_attr(not(std), no_std)]
 
 mod env;
 pub mod mem;
 pub mod process;
 pub mod util;
 
-use core::{fmt::Arguments, num::NonZeroU64};
+use core::{
+    fmt::Arguments,
+    num::{NonZeroU32, NonZeroU64},
+    str::Utf8Error,
+};
 
-use util::SyncCell;
+use mem::{NullptrError, ReadMemoryError};
+use util::{AsciiError, SyncCell};
+
+/// Any error returned by this crate.
+#[derive(Clone, Debug)]
+pub enum Error {
+    ReadMemory(ReadMemoryError),
+    Nullptr(NullptrError),
+    Utf8(Utf8Error),
+    Ascii(AsciiError),
+}
+
+impl From<Utf8Error> for crate::Error {
+    #[inline]
+    fn from(err: Utf8Error) -> Self {
+        Self::Utf8(err)
+    }
+}
 
 #[cfg(target_arch = "wasm32")]
-#[cfg_attr(not(test), panic_handler)]
+#[cfg_attr(not(std), panic_handler)]
 fn _panic_handler(info: &core::panic::PanicInfo) -> ! {
     let msg = info
         .payload()
@@ -115,7 +136,7 @@ pub mod runtime {
     ///
     /// Fails if the formatting fails or the string gets too long.
     pub fn print_fmt(args: Arguments<'_>) -> fmt::Result {
-        const BUF_LEN: usize = 2048;
+        const BUF_LEN: usize = 1024;
 
         let mut buf = WriteBuf::<BUF_LEN>::new();
         let res = fmt::write(&mut buf, args);
@@ -138,13 +159,14 @@ pub mod timer {
         Running = 1,
         /// There's an attempt that already ended, but didn't get reset yet.
         Ended = 2,
-        /// There's an active attempt that is currently paused.
+        /// There's an active attempt that is currently paused. This is separate
+        /// from the game time being paused. Game time may even always be paused.
         Paused = 3,
     }
 
     /// Gets the state that the timer currently is in.
     #[must_use]
-    pub fn get_state() -> TimerPhase {
+    pub fn get_phase() -> TimerPhase {
         use {env::timer_state::*, TimerPhase::*};
 
         match unsafe { env::timer_get_state() } {
@@ -236,6 +258,8 @@ macro_rules! println {
     }};
 }
 
-pub type ProcessId = NonZeroU64;
+pub type ProcessId = NonZeroU32;
 pub type Address = NonZeroU64;
+pub type Address32 = NonZeroU32;
+pub type Address64 = NonZeroU64;
 pub type Offset = i64;
