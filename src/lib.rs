@@ -81,21 +81,21 @@ impl From<Utf8Error> for crate::Error {
 #[cfg(target_arch = "wasm32")]
 #[cfg_attr(not(std), panic_handler)]
 fn _panic_handler(info: &core::panic::PanicInfo) -> ! {
-    let msg = info
-        .payload()
-        .downcast_ref::<&str>()
-        .unwrap_or(&"&(dyn Any)");
-    let res = if let Some(loc) = info.location() {
-        runtime::print_fmt(format_args!("panicked at '{msg}', {loc}"))
-    } else {
-        runtime::print_fmt(format_args!("panicked at '{msg}'"))
-    };
+    static PANICKING: SyncCell<bool> = SyncCell::new(false);
 
+    if PANICKING.get() {
+        runtime::print_message("panicked while processing panic");
+        core::arch::wasm32::unreachable();
+    }
+
+    PANICKING.set(true);
+
+    let res = runtime::print_fmt(format_args!("{info}"));
     if res.is_err() {
         runtime::print_message("panicked and failed to print formatted message");
     }
 
-    core::arch::wasm32::unreachable()
+    core::arch::wasm32::unreachable();
 }
 
 /// Calls the provided function only if this function hasn't been called before.
@@ -238,7 +238,8 @@ pub fn __print_fmt(args: Arguments) {
     }
 }
 
-/// Prints a log message (including a line break) for debugging purposes.
+/// Prints a log message (including a line break) for debugging purposes,
+/// similarly to `std::println`.
 ///
 /// # Panics
 ///
@@ -248,14 +249,48 @@ macro_rules! println {
     () => {
         $crate::runtime::print_message("");
     };
-    ($($arg:tt)*) => {{
-        let args = format_args!($($arg:tt)*);
-        if let Some(s) = args.as_str() {
-            $crate::runtime::print_message(s);
-        } else {
-            $crate::__print_fmt(args);
+    ($($arg:tt)*) => {
+        match format_args!($($arg)*) {
+            args => {
+                if let Some(s) = args.as_str() {
+                    $crate::runtime::print_message(s);
+                } else {
+                    $crate::__print_fmt(args);
+                }
+            }
         }
-    }};
+    };
+}
+
+/// Prints and returns the value of a given expression for quick and dirty
+/// debugging, similarly to `std::dbg`.
+///
+/// # Panics
+///
+/// Panics if the formatting fails or the string gets too long.
+#[macro_export]
+macro_rules! dbg {
+    () => {
+        $crate::println!("[{}:{}]", ::core::file!(), ::core::line!())
+    };
+    ($val:expr $(,)?) => {
+        match $val {
+            tmp => {
+                $crate::println!(
+                    "[{}:{}] {} = {:#?}",
+                    ::core::file!(),
+                    ::core::line!(),
+                    ::core::stringify!($val),
+                    &tmp
+                );
+
+                tmp
+            }
+        }
+    };
+    ($($val:expr),+ $(,)?) => {
+        ($($crate::dbg!($val)),+,)
+    };
 }
 
 pub type ProcessId = NonZeroU32;

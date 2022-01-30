@@ -301,8 +301,9 @@ impl<'a> MemoryReader<'a> {
         T::read_from(self, addr)
     }
 
-    /// Reads memory from a process at the given address and returns it as an
-    /// [`Address`]. The [`MemoryReader`]'s `base` address is ignored.
+    /// Reads memory from a process at the given address as an [`Address32`] or
+    /// [`Address64`] and returns it as an [`Address`]. The [`MemoryReader`]'s
+    /// `base` address is ignored.
     pub fn read_ptr(&self, addr: Address) -> Result<Address, ReadPtrError> {
         match self.ptr_width {
             PointerWidth::U32 => Address32::read_from(self, addr).map(Into::into),
@@ -323,7 +324,8 @@ impl<'a> MemoryReader<'a> {
 /// LiveSplit reads the value at `base + offsets[0]` and interprets the value
 /// as yet another address. It adds the next offset to this address and reads
 /// the value of the calculated address. It does this over and over until there
-/// are no more offsets. At that point, it has found the value it was searching
+/// are no more offsets. (Note that the value at the end will not be treated as
+/// a pointer and not be dereferenced.) At that point, it has found the value it was searching
 /// for. This resembles the way objects are stored in memory. Every object has a
 /// clearly defined layout where each variable has a consistent offset within
 /// the object, so you basically follow these variables from object to object.
@@ -416,18 +418,19 @@ impl<'a, T: FromMemory> PointerPathWalker<'a, T> {
         unsafe { self.path.offsets.get_unchecked(self.depth..) }
     }
 
-    /// Applies the next offset and dereferences the resulting pointer. Returns
-    /// the pointer path end if it has been reached.
+    /// Applies the next offset. Returns the pointer path end if it has been
+    /// reached. Otherwise dereferences the resulting pointer.
     pub fn advance(&mut self) -> Result<Option<PointerPathEnd<'a, T>>, ReadPtrError> {
-        Ok(if let Some(offset) = self.path.offsets.get(self.depth) {
+        if let Some(offset) = self.path.offsets.get(self.depth) {
             self.depth += 1;
-            let addr = util::ptr_offset(self.current, *offset);
-            self.current = self.reader.read_ptr(addr)?;
+            self.current = util::ptr_offset(self.current, *offset);
+            if self.depth != self.path.offsets.len() {
+                self.current = self.reader.read_ptr(self.current)?;
+                return Ok(None);
+            }
+        }
 
-            None
-        } else {
-            Some(self.end())
-        })
+        Ok(Some(self.end()))
     }
 
     /// Applies the next offset and dereferences the resulting pointer `n`
@@ -454,11 +457,11 @@ impl<'a, T: FromMemory> PointerPathWalker<'a, T> {
     /// repeatedly until the end is reached.
     #[inline]
     pub fn walk(&mut self) -> Result<PointerPathEnd<'a, T>, ReadPtrError> {
-        while self.depth < self.path.offsets.len() {
-            self.advance()?;
+        loop {
+            if let Some(end) = self.advance()? {
+                return Ok(end);
+            }
         }
-
-        Ok(self.end())
     }
 
     #[inline]
@@ -486,6 +489,14 @@ impl<'a, T: FromMemory> PointerPathEnd<'a, T> {
     #[inline]
     pub fn read(&self) -> Result<T, T::Error> {
         T::read_from(&self.reader, self.addr)
+    }
+
+    /// Reads the value at the end of the [`PointerPath`] as an [`Address32`] or
+    /// [`Address64`] and returns it as an [`Address`]. It can be read more than
+    /// once but it might become invalid if the pointer path changes.
+    #[inline]
+    pub fn read_ptr(&self) -> Result<Address, ReadPtrError> {
+        self.reader.read_ptr(self.addr)
     }
 
     /// The final pointer of a [`PointerPath`]. It can be read from more

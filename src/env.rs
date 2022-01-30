@@ -34,7 +34,7 @@ extern "C" {
         buf_len: usize,
     ) -> bool;
     /// Gets the address of a module in a process.
-    pub fn process_get_module(
+    pub fn process_get_module_address(
         process: NonZeroU64,
         name_ptr: *const u8,
         name_len: usize,

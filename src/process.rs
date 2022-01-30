@@ -36,7 +36,9 @@ impl Process {
     /// Gets the address of a module in a process.
     #[must_use]
     pub fn get_module(&self, name: &str) -> Option<Address> {
-        unsafe { env::process_get_module(self.process_id.into(), name.as_ptr(), name.len()) }
+        unsafe {
+            env::process_get_module_address(self.process_id.into(), name.as_ptr(), name.len())
+        }
     }
 }
 
