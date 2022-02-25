@@ -73,11 +73,12 @@ impl<const N: usize> FromMemory for [u8; N] {
     type Error = ReadMemoryError;
 
     fn read_from(reader: &MemoryReader<'_>, addr: Address) -> Result<Self, Self::Error> {
-        // Safety: read_exact doesn't read the buffer. If an error occurs, the
-        // buffer isn't returned, otherwise it'll contain valid data.
-        let mut buf = unsafe { util::array_assume_init(util::uninit_array::<u8, N>()) };
-        reader.read_buf(addr, &mut buf)?;
-        Ok(buf)
+        let mut buf = util::uninit_array::<u8, N>();
+        unsafe {
+            reader.read_raw(addr, buf.as_mut_ptr().cast(), buf.len())?;
+        }
+
+        Ok(unsafe { util::array_assume_init(buf) })
     }
 }
 
@@ -156,6 +157,9 @@ pub struct ReadMemoryError {
     len: usize,
 }
 
+#[cfg(feature = "std")]
+impl std::error::Error for ReadMemoryError {}
+
 impl Display for ReadMemoryError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let Self {
@@ -188,6 +192,9 @@ pub struct NullptrError {
     address: Address,
 }
 
+#[cfg(feature = "std")]
+impl std::error::Error for NullptrError {}
+
 impl Display for NullptrError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let Self {
@@ -216,6 +223,9 @@ pub enum ReadPtrError {
     /// The pointer that was read was null pointer.
     Nullptr(NullptrError),
 }
+
+#[cfg(feature = "std")]
+impl std::error::Error for ReadPtrError {}
 
 impl Display for ReadPtrError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -280,23 +290,32 @@ impl<'a> MemoryReader<'a> {
     /// buffer. The [`MemoryReader`]'s `base` address is ignored. The buffer
     /// will not be read.
     pub fn read_buf(&self, addr: Address, buf: &mut [u8]) -> Result<(), ReadMemoryError> {
-        let success = unsafe {
-            env::process_read(self.process.id().into(), addr, buf.as_mut_ptr(), buf.len())
-        };
+        unsafe { self.read_raw(addr, buf.as_mut_ptr(), buf.len()) }
+    }
+
+    /// # Safety
+    ///
+    /// The pointer has to be valid.
+    unsafe fn read_raw(
+        &self,
+        addr: Address,
+        buf_ptr: *mut u8,
+        buf_len: usize,
+    ) -> Result<(), ReadMemoryError> {
+        let success = env::process_read(self.process.id().into(), addr, buf_ptr, buf_len);
         if success {
             Ok(())
         } else {
             Err(ReadMemoryError {
                 process_id: self.process.id(),
                 address: addr,
-                len: buf.len(),
+                len: buf_len,
             })
         }
     }
 
     /// Reads memory from a process at the given address and returns it as a
     /// specific type. The [`MemoryReader`]'s `base` address is ignored.
-    #[inline]
     pub fn read<T: FromMemory>(&self, addr: Address) -> Result<T, T::Error> {
         T::read_from(self, addr)
     }
@@ -313,7 +332,6 @@ impl<'a> MemoryReader<'a> {
 
     /// Reads memory from a process at the given address and returns it as an
     /// array. The [`MemoryReader`]'s `base` address is ignored.
-    #[inline]
     pub fn read_array<const N: usize>(&self, addr: Address) -> Result<[u8; N], ReadMemoryError> {
         <[u8; N]>::read_from(self, addr)
     }
@@ -355,7 +373,6 @@ impl<'a, T: FromMemory> PointerPath<'a, T> {
         }
     }
 
-    #[inline]
     pub fn walk(self, reader: MemoryReader<'a>) -> Result<PointerPathEnd<'a, T>, ReadPtrError> {
         self.walker(reader).walk()
     }
@@ -439,7 +456,6 @@ impl<'a, T: FromMemory> PointerPathWalker<'a, T> {
     /// # Errors
     ///
     /// Returns the error and the number of successful iterations on failure.
-    #[inline]
     pub fn advance_by(
         &mut self,
         n: usize,
@@ -455,7 +471,6 @@ impl<'a, T: FromMemory> PointerPathWalker<'a, T> {
 
     /// Applies the next offset and dereferences the resulting pointer
     /// repeatedly until the end is reached.
-    #[inline]
     pub fn walk(&mut self) -> Result<PointerPathEnd<'a, T>, ReadPtrError> {
         loop {
             if let Some(end) = self.advance()? {
@@ -486,7 +501,6 @@ pub struct PointerPathEnd<'a, T> {
 impl<'a, T: FromMemory> PointerPathEnd<'a, T> {
     /// Reads the value at the end of the [`PointerPath`]. It can be read more
     /// than once but it might become invalid if the pointer path changes.
-    #[inline]
     pub fn read(&self) -> Result<T, T::Error> {
         T::read_from(&self.reader, self.addr)
     }
@@ -494,7 +508,6 @@ impl<'a, T: FromMemory> PointerPathEnd<'a, T> {
     /// Reads the value at the end of the [`PointerPath`] as an [`Address32`] or
     /// [`Address64`] and returns it as an [`Address`]. It can be read more than
     /// once but it might become invalid if the pointer path changes.
-    #[inline]
     pub fn read_ptr(&self) -> Result<Address, ReadPtrError> {
         self.reader.read_ptr(self.addr)
     }
@@ -525,7 +538,7 @@ unsafe impl<'a, T> Sync for PointerPathEnd<'a, T> {}
 ///
 /// # Example
 ///
-/// ```
+/// ```no_run
 /// # use livesplit_extension::pointer_path;
 /// pointer_path!(
 ///     IS_LOADING: bool = 0x04BA_9DC8, 0x48, 0, 0x60;

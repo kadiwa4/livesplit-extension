@@ -58,7 +58,7 @@ unsafe impl<T> Sync for SyncRefCell<T> {}
 /// A fixed size buffer that can be written to until it is full. Useful for
 /// formatted strings.
 pub struct WriteBuf<const N: usize> {
-    buf: [u8; N],
+    buf: [MaybeUninit<u8>; N],
     pos: usize,
     full: bool,
 }
@@ -68,30 +68,34 @@ impl<const N: usize> WriteBuf<N> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            // Safety: This field is private and only the initialized part of
-            // the buf can be extracted publicly.
-            buf: unsafe { array_assume_init(uninit_array::<u8, N>()) },
+            buf: uninit_array::<u8, N>(),
             pos: 0,
             full: N == 0,
         }
     }
 
     /// Returns the string that has been written to the buffer.
-    #[inline]
     #[must_use]
     pub fn as_str(&self) -> &str {
         // Safety: Only valid UTF-8 was written to buf and everything up to pos
         // was initialized.
-        unsafe { core::str::from_utf8_unchecked(self.buf.get_unchecked(..self.pos)) }
+        unsafe {
+            core::str::from_utf8_unchecked(slice_assume_init_ref(
+                self.buf.get_unchecked(..self.pos),
+            ))
+        }
     }
 
     /// Returns the string that has been written to the buffer mutably.
-    #[inline]
     #[must_use]
     pub fn as_mut_str(&mut self) -> &mut str {
         // Safety: Only valid UTF-8 was written to buf and everything up to pos
         // was initialized.
-        unsafe { core::str::from_utf8_unchecked_mut(self.buf.get_unchecked_mut(..self.pos)) }
+        unsafe {
+            core::str::from_utf8_unchecked_mut(slice_assume_init_mut(
+                self.buf.get_unchecked_mut(..self.pos),
+            ))
+        }
     }
 }
 
@@ -105,7 +109,6 @@ impl<const N: usize> Clone for WriteBuf<N> {
 }
 
 impl<const N: usize> Debug for WriteBuf<N> {
-    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // This has no generics.
         fn fmt(pos: usize, full: bool, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -126,10 +129,14 @@ impl<const N: usize> Default for WriteBuf<N> {
 }
 
 impl<const N: usize> Write for WriteBuf<N> {
-    #[inline]
     fn write_str(&mut self, s: &str) -> fmt::Result {
         // This has no generics.
-        fn write_str(buf: &mut [u8], pos: &mut usize, full: &mut bool, s: &str) -> fmt::Result {
+        fn write_str(
+            buf: &mut [MaybeUninit<u8>],
+            pos: &mut usize,
+            full: &mut bool,
+            s: &str,
+        ) -> fmt::Result {
             if *full {
                 return Err(fmt::Error);
             }
@@ -154,7 +161,7 @@ impl<const N: usize> Write for WriteBuf<N> {
 
             // Safety: buf is large enough and the two slices can't overlap.
             unsafe {
-                ptr::copy_nonoverlapping(s.as_ptr(), buf.as_mut_ptr(), count);
+                ptr::copy_nonoverlapping(s.as_ptr(), buf.as_mut_ptr().cast(), count);
             }
 
             *pos = pos.wrapping_add(count);
@@ -168,10 +175,14 @@ impl<const N: usize> Write for WriteBuf<N> {
         write_str(&mut self.buf, &mut self.pos, &mut self.full, s)
     }
 
-    #[inline]
     fn write_char(&mut self, c: char) -> fmt::Result {
         // This has no generics.
-        fn write_char(buf: &mut [u8], pos: &mut usize, full: &mut bool, c: char) -> fmt::Result {
+        fn write_char(
+            buf: &mut [MaybeUninit<u8>],
+            pos: &mut usize,
+            full: &mut bool,
+            c: char,
+        ) -> fmt::Result {
             if *full {
                 return Err(fmt::Error);
             }
@@ -200,7 +211,7 @@ impl<const N: usize> Write for WriteBuf<N> {
 /// Encodes this character as UTF-8 into the provided byte buffer. Returns an
 /// error if it doesn't fit. Same as [`char::encode_utf8`] except it doesn't
 /// panic. `len` must be equal to `c.len_utf8()` for correct results.
-pub fn char_encode_utf8(c: char, len: usize, dst: &mut [u8]) -> fmt::Result {
+pub fn char_encode_utf8(c: char, len: usize, dst: &mut [MaybeUninit<u8>]) -> fmt::Result {
     // UTF-8 ranges and tags for encoding characters
     const TAG_CONT: u8 = 0b1000_0000;
     const TAG_TWO_B: u8 = 0b1100_0000;
@@ -210,22 +221,22 @@ pub fn char_encode_utf8(c: char, len: usize, dst: &mut [u8]) -> fmt::Result {
     let code = c as u32;
     match (len, dst) {
         (1, [a, ..]) => {
-            *a = code as u8;
+            a.write(code as u8);
         }
         (2, [a, b, ..]) => {
-            *a = (code >> 6 & 0x1F) as u8 | TAG_TWO_B;
-            *b = (code & 0x3F) as u8 | TAG_CONT;
+            a.write((code >> 6 & 0x1F) as u8 | TAG_TWO_B);
+            b.write((code & 0x3F) as u8 | TAG_CONT);
         }
         (3, [a, b, c, ..]) => {
-            *a = (code >> 12 & 0x0F) as u8 | TAG_THREE_B;
-            *b = (code >> 6 & 0x3F) as u8 | TAG_CONT;
-            *c = (code & 0x3F) as u8 | TAG_CONT;
+            a.write((code >> 12 & 0x0F) as u8 | TAG_THREE_B);
+            b.write((code >> 6 & 0x3F) as u8 | TAG_CONT);
+            c.write((code & 0x3F) as u8 | TAG_CONT);
         }
         (4, [a, b, c, d, ..]) => {
-            *a = (code >> 18 & 0x07) as u8 | TAG_FOUR_B;
-            *b = (code >> 12 & 0x3F) as u8 | TAG_CONT;
-            *c = (code >> 6 & 0x3F) as u8 | TAG_CONT;
-            *d = (code & 0x3F) as u8 | TAG_CONT;
+            a.write((code >> 18 & 0x07) as u8 | TAG_FOUR_B);
+            b.write((code >> 12 & 0x3F) as u8 | TAG_CONT);
+            c.write((code >> 6 & 0x3F) as u8 | TAG_CONT);
+            d.write((code & 0x3F) as u8 | TAG_CONT);
         }
         _ => return Err(fmt::Error),
     }
@@ -249,6 +260,30 @@ pub(crate) fn uninit_array<T, const N: usize>() -> [MaybeUninit<T>; N] {
 #[inline]
 pub(crate) unsafe fn array_assume_init<T, const N: usize>(array: [MaybeUninit<T>; N]) -> [T; N] {
     (&array as *const [_; N]).cast::<[T; N]>().read()
+}
+
+/// Assuming all the elements are initialized, get a slice to them.
+///
+/// # Safety
+///
+/// It is up to the caller to guarantee that the `MaybeUninit<T>` elements
+/// really are in an initialized state.
+/// Calling this when the content is not yet fully initialized causes undefined behavior.
+#[inline]
+const unsafe fn slice_assume_init_ref<T>(slice: &[MaybeUninit<T>]) -> &[T] {
+    &*(slice as *const _ as *const [T])
+}
+
+/// Assuming all the elements are initialized, get a mutable slice to them.
+///
+/// # Safety
+///
+/// It is up to the caller to guarantee that the `MaybeUninit<T>` elements
+/// really are in an initialized state.
+/// Calling this when the content is not yet fully initialized causes undefined behavior.
+#[inline]
+unsafe fn slice_assume_init_mut<T>(slice: &mut [MaybeUninit<T>]) -> &mut [T] {
+    &mut *(slice as *mut _ as *mut [T])
 }
 
 /// A fixed size array that contains a C string and can be borrowed as a `&str`
@@ -330,6 +365,9 @@ impl Display for AsciiError {
         f.pad("invalid ascii string")
     }
 }
+
+#[cfg(feature = "std")]
+impl std::error::Error for AsciiError {}
 
 impl From<AsciiError> for crate::Error {
     #[inline]

@@ -1,7 +1,7 @@
 //! Convenience library for the LiveSplit WebAssembly extension API.
 //! You need to provide an `update` function as follows:
 //!
-//! ```
+//! ```no_run
 //! #[no_mangle]
 //! pub extern "C" fn update() {
 //!     // ...
@@ -33,20 +33,23 @@
 //! #[no_mangle]
 //! pub extern "C" fn update() {
 //!     livesplit_extension::init(init);
-//!
 //!     let state = STATE.borrow_mut();
 //!
 //!     // Loop
 //! }
+//! # fn main() { update(); }
 //! ```
 //!
-//! Make sure you _don't_ borrow `STATE` _before_ calling the `init` function
+//! Make sure you _do not_ borrow `STATE` _before_ calling the `init` function
 //! (unless you make `init` a closure; in that case, you will only need to call
 //! [`borrow_mut`] once).
 //!
 //! [`borrow_mut`]: core::cell::RefCell::borrow_mut
 
-#![cfg_attr(not(std), no_std)]
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
 
 mod env;
 pub mod mem;
@@ -54,7 +57,7 @@ pub mod process;
 pub mod util;
 
 use core::{
-    fmt::Arguments,
+    fmt::{Arguments, Display},
     num::{NonZeroU32, NonZeroU64},
     str::Utf8Error,
 };
@@ -63,6 +66,7 @@ use mem::{NullptrError, ReadMemoryError};
 use util::{AsciiError, SyncCell};
 
 /// Any error returned by this crate.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum Error {
     ReadMemory(ReadMemoryError),
@@ -71,6 +75,9 @@ pub enum Error {
     Ascii(AsciiError),
 }
 
+#[cfg(feature = "std")]
+impl std::error::Error for Error {}
+
 impl From<Utf8Error> for crate::Error {
     #[inline]
     fn from(err: Utf8Error) -> Self {
@@ -78,17 +85,26 @@ impl From<Utf8Error> for crate::Error {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-#[cfg_attr(not(std), panic_handler)]
-fn _panic_handler(info: &core::panic::PanicInfo) -> ! {
+impl Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ReadMemory(err) => Display::fmt(err, f),
+            Self::Nullptr(err) => Display::fmt(err, f),
+            Self::Utf8(err) => Display::fmt(err, f),
+            Self::Ascii(err) => Display::fmt(err, f),
+        }
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "std")))]
+#[panic_handler]
+fn panic_impl(info: &core::panic::PanicInfo) -> ! {
     static PANICKING: SyncCell<bool> = SyncCell::new(false);
 
-    if PANICKING.get() {
+    if PANICKING.replace(true) {
         runtime::print_message("panicked while processing panic");
         core::arch::wasm32::unreachable();
     }
-
-    PANICKING.set(true);
 
     let res = runtime::print_fmt(format_args!("{info}"));
     if res.is_err() {
@@ -103,8 +119,7 @@ fn _panic_handler(info: &core::panic::PanicInfo) -> ! {
 pub fn init(f: impl FnOnce()) {
     static SHOULD_RUN_INIT: SyncCell<bool> = SyncCell::new(true);
 
-    if SHOULD_RUN_INIT.get() {
-        SHOULD_RUN_INIT.set(false);
+    if SHOULD_RUN_INIT.take() {
         f();
     }
 }
@@ -112,7 +127,7 @@ pub fn init(f: impl FnOnce()) {
 pub mod runtime {
     use core::fmt::{self, Arguments};
 
-    use crate::{env, util::WriteBuf};
+    use crate::env;
 
     /// Sets the tick rate of the runtime. This influences the amount of
     /// times the `update` function is called per second.
@@ -134,14 +149,24 @@ pub mod runtime {
     ///
     /// # Errors
     ///
-    /// Fails if the formatting fails or the string gets too long.
+    /// Fails if the formatting fails or the string gets too long (without
+    /// feature `alloc`).
     pub fn print_fmt(args: Arguments<'_>) -> fmt::Result {
         const BUF_LEN: usize = 1024;
 
-        let mut buf = WriteBuf::<BUF_LEN>::new();
-        let res = fmt::write(&mut buf, args);
-        print_message(buf.as_str());
-        res
+        #[cfg(feature = "alloc")]
+        {
+            let _ = BUF_LEN;
+            print_message(&alloc::fmt::format(args));
+            Ok(())
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            let mut buf = crate::util::WriteBuf::<BUF_LEN>::new();
+            let res = fmt::write(&mut buf, args);
+            print_message(buf.as_str());
+            res
+        }
     }
 }
 
