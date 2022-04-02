@@ -13,7 +13,7 @@
 //!
 //! # Examples
 //!
-//! ```
+//! ```ignore
 //! use livesplit_extension::util::SyncRefCell;
 //!
 //! struct State {
@@ -37,7 +37,6 @@
 //!
 //!     // Loop
 //! }
-//! # fn main() { update(); }
 //! ```
 //!
 //! Make sure you _do not_ borrow `STATE` _before_ calling the `init` function
@@ -63,7 +62,7 @@ use core::{
 };
 
 use mem::{NullptrError, ReadMemoryError};
-use util::{AsciiError, SyncCell};
+use util::AsciiError;
 
 /// Any error returned by this crate.
 #[non_exhaustive]
@@ -99,7 +98,7 @@ impl Display for Error {
 #[cfg(all(target_arch = "wasm32", not(feature = "std")))]
 #[panic_handler]
 fn panic_impl(info: &core::panic::PanicInfo) -> ! {
-    static PANICKING: SyncCell<bool> = SyncCell::new(false);
+    static PANICKING: util::SyncCell<bool> = util::SyncCell::new(false);
 
     if PANICKING.replace(true) {
         runtime::print_message("panicked while processing panic");
@@ -115,9 +114,10 @@ fn panic_impl(info: &core::panic::PanicInfo) -> ! {
 }
 
 /// Calls the provided function only if this function hasn't been called before.
+#[cfg(target_arch = "wasm32")]
 #[inline]
 pub fn init(f: impl FnOnce()) {
-    static SHOULD_RUN_INIT: SyncCell<bool> = SyncCell::new(true);
+    static SHOULD_RUN_INIT: util::SyncCell<bool> = util::SyncCell::new(true);
 
     if SHOULD_RUN_INIT.take() {
         f();
@@ -131,6 +131,7 @@ pub mod runtime {
 
     /// Sets the tick rate of the runtime. This influences the amount of
     /// times the `update` function is called per second.
+    #[inline]
     pub fn set_tick_rate(ticks_per_second: f64) {
         unsafe {
             env::runtime_set_tick_rate(ticks_per_second);
@@ -138,6 +139,7 @@ pub mod runtime {
     }
 
     /// Prints a log message (including a line break) for debugging purposes.
+    #[inline]
     pub fn print_message(text: &str) {
         unsafe {
             env::runtime_print_message(text.as_ptr(), text.len());
@@ -190,11 +192,11 @@ pub mod timer {
     }
 
     /// Gets the state that the timer currently is in.
-    #[must_use]
     pub fn get_phase() -> TimerPhase {
         use {env::timer_state::*, TimerPhase::*};
 
-        match unsafe { env::timer_get_state() } {
+        let state = unsafe { env::timer_get_state() };
+        match state {
             NOT_RUNNING => NotRunning,
             RUNNING => Running,
             ENDED => Ended,
@@ -203,6 +205,7 @@ pub mod timer {
     }
 
     /// Starts the timer.
+    #[inline]
     pub fn start() {
         unsafe {
             env::timer_start();
@@ -210,6 +213,7 @@ pub mod timer {
     }
 
     /// Splits the current segment.
+    #[inline]
     pub fn split() {
         unsafe {
             env::timer_split();
@@ -217,6 +221,7 @@ pub mod timer {
     }
 
     /// Resets the timer.
+    #[inline]
     pub fn reset() {
         unsafe {
             env::timer_reset();
@@ -225,6 +230,7 @@ pub mod timer {
 
     /// Sets a custom key value pair. This may be arbitrary information that
     /// the auto splitter wants to provide for visualization.
+    #[inline]
     pub fn set_variable(key: &str, value: &str) {
         unsafe {
             env::timer_set_variable(key.as_ptr(), key.len(), value.as_ptr(), value.len());
@@ -232,6 +238,7 @@ pub mod timer {
     }
 
     /// Sets the game time.
+    #[inline]
     pub fn set_game_time(secs: i64, nanos: i32) {
         unsafe {
             env::timer_set_game_time(secs, nanos);
@@ -240,6 +247,7 @@ pub mod timer {
 
     /// Pauses the game time. This does not pause the timer, only the
     /// automatic flow of time for the game time.
+    #[inline]
     pub fn pause_game_time() {
         unsafe {
             env::timer_pause_game_time();
@@ -248,6 +256,7 @@ pub mod timer {
 
     /// Resumes the game time. This does not resume the timer, only the
     /// automatic flow of time for the game time.
+    #[inline]
     pub fn resume_game_time() {
         unsafe {
             env::timer_resume_game_time();
@@ -257,7 +266,7 @@ pub mod timer {
 
 #[track_caller]
 #[doc(hidden)]
-pub fn __print_fmt(args: Arguments) {
+pub fn _print_fmt(args: Arguments) {
     if runtime::print_fmt(args).is_err() {
         panic!("failed printing formatted message; maybe the string got too long");
     }
@@ -280,7 +289,7 @@ macro_rules! println {
                 if let Some(s) = args.as_str() {
                     $crate::runtime::print_message(s);
                 } else {
-                    $crate::__print_fmt(args);
+                    $crate::_print_fmt(args);
                 }
             }
         }

@@ -26,6 +26,7 @@ pub enum Endianness {
 }
 
 impl Default for Endianness {
+    #[inline]
     fn default() -> Self {
         Self::Le
     }
@@ -55,13 +56,19 @@ pub enum PointerWidth {
 }
 
 impl Default for PointerWidth {
+    #[inline]
     fn default() -> Self {
         Self::U64
     }
 }
 
 /// Indicates that the type can be extracted from another process' memory.
-pub trait FromMemory: Clone + Sized {
+pub trait FromMemory: Clone {
+    /// Implements `std::error::Error` if available and `Debug + Display` otherwise.
+    #[cfg(feature = "std")]
+    type Error: std::error::Error;
+    /// Implements `std::error::Error` if available and `Debug + Display` otherwise.
+    #[cfg(not(feature = "std"))]
     type Error: Debug + Display;
 
     /// Reads memory from a process at the given address and returns it as a
@@ -138,7 +145,6 @@ impl FromMemory for bool {
 impl<const N: usize> FromMemory for StringBuf<N> {
     type Error = ReadMemoryError;
 
-    #[inline]
     fn read_from(reader: &MemoryReader<'_>, addr: Address) -> Result<Self, Self::Error> {
         <[u8; N]>::read_from(reader, addr).map(StringBuf)
     }
@@ -185,7 +191,7 @@ impl From<ReadMemoryError> for crate::Error {
 /// process' memory and the value that is read is zero.
 ///
 /// Trying to dereference that pointer would also lead to an error, but it would
-/// be harder to debug because you wouldn't be told the last valid pointer.
+/// be harder to debug because you wouldn't know the last valid pointer.
 #[derive(Clone, Copy, Debug)]
 pub struct NullptrError {
     process_id: ProcessId,
@@ -277,6 +283,7 @@ pub struct MemoryReader<'a> {
 impl<'a> MemoryReader<'a> {
     /// In most cases, you want little endian, 64-bit pointers.
     /// This is a convenience function that uses those default settings.
+    #[inline]
     pub const fn new_default(process: &'a Process, base: Address) -> Self {
         Self {
             process,
@@ -325,7 +332,7 @@ impl<'a> MemoryReader<'a> {
     /// `base` address is ignored.
     pub fn read_ptr(&self, addr: Address) -> Result<Address, ReadPtrError> {
         match self.ptr_width {
-            PointerWidth::U32 => Address32::read_from(self, addr).map(Into::into),
+            PointerWidth::U32 => Ok(Address32::read_from(self, addr)?.into()),
             PointerWidth::U64 => Address64::read_from(self, addr),
         }
     }
@@ -353,6 +360,23 @@ impl<'a> MemoryReader<'a> {
 ///
 /// Source: [LiveSplit Auto Splitter Documentation][asl-docs]
 ///
+/// See the [`pointer_path`] macro for prettier definitions.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use core::marker::PhantomData;
+/// # use livesplit_extension::{mem::{MemoryReader, PointerPath}, Error};
+/// static IS_LOADING: PointerPath<'_, bool> = PointerPath {
+///     offsets: &[0x04BA_9DC8, 0x48, 0, 0x60],
+///     marker: PhantomData,
+/// };
+///
+/// fn is_loading(reader: MemoryReader<'_>) -> Result<bool, Error> {
+///     Ok(IS_LOADING.walk(reader)?.read()?)
+/// }
+/// ```
+///
 /// [Cheat Engine]: https://www.cheatengine.org
 /// [asl-docs]: https://github.com/LiveSplit/LiveSplit.AutoSplitters#pointer-paths
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -363,7 +387,6 @@ pub struct PointerPath<'a, T: FromMemory> {
 
 impl<'a, T: FromMemory> PointerPath<'a, T> {
     #[inline]
-    #[must_use]
     pub fn walker(self, reader: MemoryReader<'a>) -> PointerPathWalker<'a, T> {
         PointerPathWalker {
             path: self,
@@ -388,6 +411,7 @@ unsafe impl<'a, T: FromMemory> Sync for PointerPath<'a, T> {}
 /// changed at any time.
 ///
 /// [pointer path]: PointerPath
+#[must_use = "pointer path walkers are lazy and do nothing unless walked"]
 #[derive(Clone, Debug)]
 pub struct PointerPathWalker<'a, T: FromMemory> {
     path: PointerPath<'a, T>,
@@ -399,14 +423,12 @@ pub struct PointerPathWalker<'a, T: FromMemory> {
 impl<'a, T: FromMemory> PointerPathWalker<'a, T> {
     /// The whole pointer path that this is walking.
     #[inline]
-    #[must_use]
     pub fn path(&self) -> PointerPath<'a, T> {
         self.path
     }
 
     /// The current pointer (without an offset).
     #[inline]
-    #[must_use]
     pub fn current_ptr(&self) -> Address {
         self.current
     }
@@ -414,14 +436,12 @@ impl<'a, T: FromMemory> PointerPathWalker<'a, T> {
     /// Indicates how far the path has been walked. Always less than or equal to
     /// `offsets.len()`. This is the same as `walked_offsets().len()`.
     #[inline]
-    #[must_use]
     pub fn current_depth(&self) -> usize {
         self.depth
     }
 
     /// The pointer path offsets that have been applied so far.
     #[inline]
-    #[must_use]
     pub fn walked_offsets(&self) -> &[Offset] {
         // Safety: depth <= offsets.len().
         unsafe { self.path.offsets.get_unchecked(..self.depth) }
@@ -429,7 +449,6 @@ impl<'a, T: FromMemory> PointerPathWalker<'a, T> {
 
     /// The pointer path offsets that have not been applied yet.
     #[inline]
-    #[must_use]
     pub fn remaining_offsets(&self) -> &[Offset] {
         // Safety: depth <= offsets.len().
         unsafe { self.path.offsets.get_unchecked(self.depth..) }
@@ -447,7 +466,13 @@ impl<'a, T: FromMemory> PointerPathWalker<'a, T> {
             }
         }
 
-        Ok(Some(self.end()))
+        let end = PointerPathEnd {
+            reader: self.reader,
+            addr: self.current,
+            marker: PhantomData,
+        };
+
+        Ok(Some(end))
     }
 
     /// Applies the next offset and dereferences the resulting pointer `n`
@@ -478,15 +503,6 @@ impl<'a, T: FromMemory> PointerPathWalker<'a, T> {
             }
         }
     }
-
-    #[inline]
-    fn end(&self) -> PointerPathEnd<'a, T> {
-        PointerPathEnd {
-            reader: self.reader,
-            addr: self.current,
-            marker: PhantomData,
-        }
-    }
 }
 
 /// The result of walking a [`PointerPath`]. The value at this address can be
@@ -496,6 +512,15 @@ pub struct PointerPathEnd<'a, T> {
     pub reader: MemoryReader<'a>,
     addr: Address,
     marker: PhantomData<*const T>,
+}
+
+impl<'a, T> PointerPathEnd<'a, T> {
+    /// The final pointer of a [`PointerPath`]. It can be read from more
+    /// than once but it might become invalid if the pointer path changes.
+    #[inline]
+    pub fn address(&self) -> Address {
+        self.addr
+    }
 }
 
 impl<'a, T: FromMemory> PointerPathEnd<'a, T> {
@@ -511,14 +536,6 @@ impl<'a, T: FromMemory> PointerPathEnd<'a, T> {
     pub fn read_ptr(&self) -> Result<Address, ReadPtrError> {
         self.reader.read_ptr(self.addr)
     }
-
-    /// The final pointer of a [`PointerPath`]. It can be read from more
-    /// than once but it might become invalid if the pointer path changes.
-    #[inline]
-    #[must_use]
-    pub fn address(&self) -> Address {
-        self.addr
-    }
 }
 
 unsafe impl<'a, T> Send for PointerPathEnd<'a, T> {}
@@ -530,19 +547,19 @@ unsafe impl<'a, T> Sync for PointerPathEnd<'a, T> {}
 /// # Syntax
 ///
 /// ```text
-/// pointer_path!(
+/// pointer_path! {
 ///     [<visibility>] NAME: TargetType = <offset1>, <offset2>, [...];
 ///     [...];
-/// );
+/// }
 /// ```
 ///
 /// # Example
 ///
 /// ```no_run
 /// # use livesplit_extension::pointer_path;
-/// pointer_path!(
+/// pointer_path! {
 ///     IS_LOADING: bool = 0x04BA_9DC8, 0x48, 0, 0x60;
-/// );
+/// }
 /// ```
 #[macro_export]
 macro_rules! pointer_path {

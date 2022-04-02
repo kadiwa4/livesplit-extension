@@ -1,59 +1,137 @@
 //! Useful but unrelated utilities.
 
 use core::{
-    cell::{Cell, RefCell},
     fmt::{self, Debug, Display, Write},
     mem::MaybeUninit,
     num::NonZeroU64,
-    ops::Deref,
     ptr,
     str::Utf8Error,
 };
 
-/// A mutable memory location.
-///
-/// See [`core::cell`] for more.
-#[repr(transparent)]
-pub struct SyncCell<T: ?Sized>(pub Cell<T>);
+#[cfg(target_arch = "wasm32")]
+mod wasm {
+    use core::{
+        cell::{Cell, RefCell},
+        cmp::Ordering,
+        fmt::{self, Debug, Formatter},
+        ops::Deref,
+    };
 
-impl<T> SyncCell<T> {
-    pub const fn new(v: T) -> Self {
-        Self(Cell::new(v))
+    /// A mutable memory location.
+    ///
+    /// See [`core::cell`] for more.
+    #[repr(transparent)]
+    #[derive(Default)]
+    pub struct SyncCell<T: ?Sized>(pub Cell<T>);
+
+    impl<T> SyncCell<T> {
+        #[inline]
+        pub const fn new(v: T) -> Self {
+            Self(Cell::new(v))
+        }
     }
+
+    impl<T: Copy> Clone for SyncCell<T> {
+        #[inline]
+        fn clone(&self) -> Self {
+            Self(Cell::new(self.0.get()))
+        }
+    }
+
+    impl<T: Copy + Debug> Debug for SyncCell<T> {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            f.debug_tuple("SyncCell").field(&self.0).finish()
+        }
+    }
+
+    impl<T> Deref for SyncCell<T> {
+        type Target = Cell<T>;
+
+        #[inline]
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl<T: Copy + PartialEq> PartialEq for SyncCell<T> {
+        fn eq(&self, other: &Self) -> bool {
+            self.0.get() == other.0.get()
+        }
+    }
+
+    impl<T: Copy + Eq> Eq for SyncCell<T> {}
+
+    impl<T: PartialOrd + Copy> PartialOrd for SyncCell<T> {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            self.0.get().partial_cmp(&other.0.get())
+        }
+    }
+
+    impl<T: Ord + Copy> Ord for SyncCell<T> {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.0.get().cmp(&other.0.get())
+        }
+    }
+
+    impl<T> From<T> for SyncCell<T> {
+        #[inline]
+        fn from(t: T) -> Self {
+            Self(Cell::new(t))
+        }
+    }
+
+    impl<T> From<Cell<T>> for SyncCell<T> {
+        #[inline]
+        fn from(cell: Cell<T>) -> Self {
+            Self(cell)
+        }
+    }
+
+    // Safety: No threading.
+    unsafe impl<T> Sync for SyncCell<T> {}
+
+    /// A mutable memory location with dynamically checked borrow rules.
+    ///
+    /// See [`core::cell`] for more.
+    #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct SyncRefCell<T: ?Sized>(pub RefCell<T>);
+
+    impl<T> SyncRefCell<T> {
+        #[inline]
+        pub const fn new(v: T) -> Self {
+            Self(RefCell::new(v))
+        }
+    }
+
+    impl<T> Deref for SyncRefCell<T> {
+        type Target = RefCell<T>;
+
+        #[inline]
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl<T> From<T> for SyncRefCell<T> {
+        #[inline]
+        fn from(t: T) -> Self {
+            Self(RefCell::new(t))
+        }
+    }
+
+    impl<T> From<RefCell<T>> for SyncRefCell<T> {
+        #[inline]
+        fn from(cell: RefCell<T>) -> Self {
+            Self(cell)
+        }
+    }
+
+    // Safety: No threading.
+    unsafe impl<T> Sync for SyncRefCell<T> {}
 }
 
-impl<T> Deref for SyncCell<T> {
-    type Target = Cell<T>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-// Safety: No threading.
-unsafe impl<T> Sync for SyncCell<T> {}
-
-/// A mutable memory location with dynamically checked borrow rules.
-///
-/// See [`core::cell`] for more.
-pub struct SyncRefCell<T: ?Sized>(pub RefCell<T>);
-
-impl<T> SyncRefCell<T> {
-    pub const fn new(v: T) -> Self {
-        Self(RefCell::new(v))
-    }
-}
-
-impl<T> Deref for SyncRefCell<T> {
-    type Target = RefCell<T>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-// Safety: No threading.
-unsafe impl<T> Sync for SyncRefCell<T> {}
+#[cfg(target_arch = "wasm32")]
+pub use wasm::*;
 
 /// A fixed size buffer that can be written to until it is full. Useful for
 /// formatted strings.
@@ -65,7 +143,7 @@ pub struct WriteBuf<const N: usize> {
 
 impl<const N: usize> WriteBuf<N> {
     /// Constructs a new empty [`WriteBuf`].
-    #[must_use]
+    #[inline]
     pub fn new() -> Self {
         Self {
             buf: uninit_array::<u8, N>(),
@@ -75,26 +153,24 @@ impl<const N: usize> WriteBuf<N> {
     }
 
     /// Returns the string that has been written to the buffer.
-    #[must_use]
+    #[inline]
     pub fn as_str(&self) -> &str {
         // Safety: Only valid UTF-8 was written to buf and everything up to pos
         // was initialized.
         unsafe {
-            core::str::from_utf8_unchecked(slice_assume_init_ref(
-                self.buf.get_unchecked(..self.pos),
-            ))
+            let slice = self.buf.get_unchecked(..self.pos);
+            core::str::from_utf8_unchecked(slice_assume_init_ref(slice))
         }
     }
 
     /// Returns the string that has been written to the buffer mutably.
-    #[must_use]
+    #[inline]
     pub fn as_mut_str(&mut self) -> &mut str {
         // Safety: Only valid UTF-8 was written to buf and everything up to pos
         // was initialized.
         unsafe {
-            core::str::from_utf8_unchecked_mut(slice_assume_init_mut(
-                self.buf.get_unchecked_mut(..self.pos),
-            ))
+            let slice = self.buf.get_unchecked_mut(..self.pos);
+            core::str::from_utf8_unchecked_mut(slice_assume_init_mut(slice))
         }
     }
 }
@@ -123,6 +199,7 @@ impl<const N: usize> Debug for WriteBuf<N> {
 }
 
 impl<const N: usize> Default for WriteBuf<N> {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -259,7 +336,7 @@ pub(crate) fn uninit_array<T, const N: usize>() -> [MaybeUninit<T>; N] {
 /// in an initialized state.
 #[inline]
 pub(crate) unsafe fn array_assume_init<T, const N: usize>(array: [MaybeUninit<T>; N]) -> [T; N] {
-    (&array as *const [_; N]).cast::<[T; N]>().read()
+    (&array as *const [_; N] as *const [T; N]).read()
 }
 
 /// Assuming all the elements are initialized, get a slice to them.
@@ -378,18 +455,16 @@ impl From<AsciiError> for crate::Error {
 
 /// Finds the first NUL byte and returns a slice containing everything up to
 /// that.
-#[must_use]
 pub fn get_c_str_slice(buf: &[u8]) -> &[u8] {
-    let len = buf.iter().position(|b| *b == b'\0').unwrap_or(buf.len());
+    let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
     // Safety: len <= buf.len().
     unsafe { buf.get_unchecked(..len) }
 }
 
 /// Finds the first NUL byte and returns a mutable slice containing everything
 /// up to that.
-#[must_use]
 pub fn get_c_str_slice_mut(buf: &mut [u8]) -> &mut [u8] {
-    let len = buf.iter().position(|b| *b == b'\0').unwrap_or(buf.len());
+    let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
     // Safety: len <= buf.len().
     unsafe { buf.get_unchecked_mut(..len) }
 }
@@ -417,7 +492,6 @@ pub fn str_from_ascii_mut(buf: &mut [u8]) -> Result<&mut str, AsciiError> {
 /// Adds the offset to the pointer, returning `None` if the result is a
 /// null-pointer.
 #[inline]
-#[must_use]
 pub const fn try_ptr_offset(ptr: NonZeroU64, offset: i64) -> Option<NonZeroU64> {
     NonZeroU64::new(ptr.get().wrapping_add(offset as u64))
 }
@@ -428,7 +502,6 @@ pub const fn try_ptr_offset(ptr: NonZeroU64, offset: i64) -> Option<NonZeroU64> 
 ///
 /// Panics if the result is a null-pointer.
 #[inline]
-#[must_use]
 pub fn ptr_offset(ptr: NonZeroU64, offset: i64) -> NonZeroU64 {
     NonZeroU64::new(ptr.get().wrapping_add(offset as u64)).expect("offset led to nullptr")
 }
