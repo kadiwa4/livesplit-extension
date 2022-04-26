@@ -20,30 +20,24 @@
 //!     // Persistent variables
 //! }
 //!
-//! static STATE: SyncRefCell<State> = SyncRefCell::new(State {
-//!     // Initial values of STATE
-//! });
+//! static STATE: SyncRefCell<Option<State>> = SyncRefCell::new(None);
 //!
-//! fn init() {
-//!     let state = STATE.borrow_mut();
-//!
+//! fn init() -> State {
 //!     // One-time initialization
+//!
+//!     State {
+//!         // Initial values of STATE
+//!     }
 //! }
 //!
 //! #[no_mangle]
 //! pub extern "C" fn update() {
-//!     livesplit_extension::init(init);
-//!     let state = STATE.borrow_mut();
+//!     let mut state = STATE.borrow_mut();
+//!     let state = state.get_or_insert_with(init);
 //!
 //!     // Loop
 //! }
 //! ```
-//!
-//! Make sure you _do not_ borrow `STATE` _before_ calling the `init` function
-//! (unless you make `init` a closure; in that case, you will only need to call
-//! [`borrow_mut`] once).
-//!
-//! [`borrow_mut`]: core::cell::RefCell::borrow_mut
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -60,9 +54,9 @@ use core::{
     num::{NonZeroU32, NonZeroU64},
     str::Utf8Error,
 };
-
 use mem::{NullptrError, ReadMemoryError};
-use util::AsciiError;
+
+use ascii::AsAsciiStrError;
 
 /// Any error returned by this crate.
 #[non_exhaustive]
@@ -71,7 +65,7 @@ pub enum Error {
     ReadMemory(ReadMemoryError),
     Nullptr(NullptrError),
     Utf8(Utf8Error),
-    Ascii(AsciiError),
+    Ascii(AsAsciiStrError),
 }
 
 #[cfg(feature = "std")]
@@ -113,17 +107,6 @@ fn panic_impl(info: &core::panic::PanicInfo) -> ! {
     core::arch::wasm32::unreachable();
 }
 
-/// Calls the provided function only if this function hasn't been called before.
-#[cfg(target_arch = "wasm32")]
-#[inline]
-pub fn init(f: impl FnOnce()) {
-    static SHOULD_RUN_INIT: util::SyncCell<bool> = util::SyncCell::new(true);
-
-    if SHOULD_RUN_INIT.take() {
-        f();
-    }
-}
-
 pub mod runtime {
     use core::fmt::{self, Arguments};
 
@@ -154,21 +137,19 @@ pub mod runtime {
     /// Fails if the formatting fails or the string gets too long (without
     /// feature `alloc`).
     pub fn print_fmt(args: Arguments<'_>) -> fmt::Result {
-        const BUF_LEN: usize = 1024;
-
         #[cfg(feature = "alloc")]
-        {
-            let _ = BUF_LEN;
-            print_message(&alloc::fmt::format(args));
-            Ok(())
-        }
+        print_message(&alloc::fmt::format(args));
+
         #[cfg(not(feature = "alloc"))]
         {
-            let mut buf = crate::util::WriteBuf::<BUF_LEN>::new();
-            let res = fmt::write(&mut buf, args);
-            print_message(buf.as_str());
-            res
+            const BUF_LEN: usize = 1024;
+
+            let mut buf = arrayvec::ArrayString::<BUF_LEN>::new();
+            fmt::write(&mut buf, args)?;
+            print_message(&buf);
         }
+
+        Ok(())
     }
 }
 
@@ -266,10 +247,11 @@ pub mod timer {
 
 #[track_caller]
 #[doc(hidden)]
-pub fn _print_fmt(args: Arguments) {
-    if runtime::print_fmt(args).is_err() {
-        panic!("failed printing formatted message; maybe the string got too long");
-    }
+pub fn _print_fmt(args: Arguments<'_>) {
+    assert!(
+        runtime::print_fmt(args).is_ok(),
+        "failed printing formatted message; maybe the string got too long"
+    );
 }
 
 /// Prints a log message (including a line break) for debugging purposes,

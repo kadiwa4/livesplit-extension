@@ -1,12 +1,13 @@
 //! Useful but unrelated utilities.
 
 use core::{
-    fmt::{self, Debug, Display, Write},
+    fmt::{self, Debug},
     mem::MaybeUninit,
     num::NonZeroU64,
-    ptr,
     str::Utf8Error,
 };
+
+use ascii::{AsAsciiStr, AsAsciiStrError, AsMutAsciiStr, AsciiChar, AsciiStr};
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
@@ -133,194 +134,6 @@ mod wasm {
 #[cfg(target_arch = "wasm32")]
 pub use wasm::*;
 
-/// A fixed size buffer that can be written to until it is full. Useful for
-/// formatted strings.
-pub struct WriteBuf<const N: usize> {
-    buf: [MaybeUninit<u8>; N],
-    pos: usize,
-    full: bool,
-}
-
-impl<const N: usize> WriteBuf<N> {
-    /// Constructs a new empty [`WriteBuf`].
-    #[inline]
-    pub fn new() -> Self {
-        Self {
-            buf: uninit_array::<u8, N>(),
-            pos: 0,
-            full: N == 0,
-        }
-    }
-
-    /// Returns the string that has been written to the buffer.
-    #[inline]
-    pub fn as_str(&self) -> &str {
-        // Safety: Only valid UTF-8 was written to buf and everything up to pos
-        // was initialized.
-        unsafe {
-            let slice = self.buf.get_unchecked(..self.pos);
-            core::str::from_utf8_unchecked(slice_assume_init_ref(slice))
-        }
-    }
-
-    /// Returns the string that has been written to the buffer mutably.
-    #[inline]
-    pub fn as_mut_str(&mut self) -> &mut str {
-        // Safety: Only valid UTF-8 was written to buf and everything up to pos
-        // was initialized.
-        unsafe {
-            let slice = self.buf.get_unchecked_mut(..self.pos);
-            core::str::from_utf8_unchecked_mut(slice_assume_init_mut(slice))
-        }
-    }
-}
-
-impl<const N: usize> Clone for WriteBuf<N> {
-    fn clone(&self) -> Self {
-        let mut buf = Self::new();
-        let _ = buf.write_str(self.as_str());
-        buf.full = self.full;
-        buf
-    }
-}
-
-impl<const N: usize> Debug for WriteBuf<N> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // This has no generics.
-        fn fmt(pos: usize, full: bool, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("WriteBuf")
-                .field("pos", &pos)
-                .field("full", &full)
-                .finish()
-        }
-
-        fmt(self.pos, self.full, f)
-    }
-}
-
-impl<const N: usize> Default for WriteBuf<N> {
-    #[inline]
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<const N: usize> Write for WriteBuf<N> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        // This has no generics.
-        fn write_str(
-            buf: &mut [MaybeUninit<u8>],
-            pos: &mut usize,
-            full: &mut bool,
-            s: &str,
-        ) -> fmt::Result {
-            if *full {
-                return Err(fmt::Error);
-            }
-
-            // Safety: pos is a valid index.
-            let buf = unsafe { buf.get_unchecked_mut(*pos..) };
-            if s.len() >= buf.len() {
-                *full = true;
-            }
-
-            let count = if s.len() > buf.len() {
-                // buf.len() >= 1, otherwise full would be true.
-                let mut idx = buf.len().wrapping_sub(1);
-                while !s.is_char_boundary(idx) {
-                    idx = idx.wrapping_sub(1);
-                }
-
-                idx
-            } else {
-                s.len()
-            };
-
-            // Safety: buf is large enough and the two slices can't overlap.
-            unsafe {
-                ptr::copy_nonoverlapping(s.as_ptr(), buf.as_mut_ptr().cast(), count);
-            }
-
-            *pos = pos.wrapping_add(count);
-            if *full {
-                Err(fmt::Error)
-            } else {
-                Ok(())
-            }
-        }
-
-        write_str(&mut self.buf, &mut self.pos, &mut self.full, s)
-    }
-
-    fn write_char(&mut self, c: char) -> fmt::Result {
-        // This has no generics.
-        fn write_char(
-            buf: &mut [MaybeUninit<u8>],
-            pos: &mut usize,
-            full: &mut bool,
-            c: char,
-        ) -> fmt::Result {
-            if *full {
-                return Err(fmt::Error);
-            }
-
-            // Safety: pos is a valid index.
-            let buf = unsafe { buf.get_unchecked_mut(*pos..) };
-            let len = c.len_utf8();
-            if len >= buf.len() {
-                *full = true;
-            }
-
-            let _ = char_encode_utf8(c, len, buf);
-
-            *pos = pos.wrapping_add(len);
-            if *full {
-                Err(fmt::Error)
-            } else {
-                Ok(())
-            }
-        }
-
-        write_char(&mut self.buf, &mut self.pos, &mut self.full, c)
-    }
-}
-
-/// Encodes this character as UTF-8 into the provided byte buffer. Returns an
-/// error if it doesn't fit. Same as [`char::encode_utf8`] except it doesn't
-/// panic. `len` must be equal to `c.len_utf8()` for correct results.
-pub fn char_encode_utf8(c: char, len: usize, dst: &mut [MaybeUninit<u8>]) -> fmt::Result {
-    // UTF-8 ranges and tags for encoding characters
-    const TAG_CONT: u8 = 0b1000_0000;
-    const TAG_TWO_B: u8 = 0b1100_0000;
-    const TAG_THREE_B: u8 = 0b1110_0000;
-    const TAG_FOUR_B: u8 = 0b1111_0000;
-
-    let code = c as u32;
-    match (len, dst) {
-        (1, [a, ..]) => {
-            a.write(code as u8);
-        }
-        (2, [a, b, ..]) => {
-            a.write((code >> 6 & 0x1F) as u8 | TAG_TWO_B);
-            b.write((code & 0x3F) as u8 | TAG_CONT);
-        }
-        (3, [a, b, c, ..]) => {
-            a.write((code >> 12 & 0x0F) as u8 | TAG_THREE_B);
-            b.write((code >> 6 & 0x3F) as u8 | TAG_CONT);
-            c.write((code & 0x3F) as u8 | TAG_CONT);
-        }
-        (4, [a, b, c, d, ..]) => {
-            a.write((code >> 18 & 0x07) as u8 | TAG_FOUR_B);
-            b.write((code >> 12 & 0x3F) as u8 | TAG_CONT);
-            c.write((code >> 6 & 0x3F) as u8 | TAG_CONT);
-            d.write((code & 0x3F) as u8 | TAG_CONT);
-        }
-        _ => return Err(fmt::Error),
-    }
-
-    Ok(())
-}
-
 /// Create a new array of `MaybeUninit<T>` items, in an uninitialized state.
 #[inline]
 pub(crate) fn uninit_array<T, const N: usize>() -> [MaybeUninit<T>; N] {
@@ -339,30 +152,6 @@ pub(crate) unsafe fn array_assume_init<T, const N: usize>(array: [MaybeUninit<T>
     (&array as *const [_; N] as *const [T; N]).read()
 }
 
-/// Assuming all the elements are initialized, get a slice to them.
-///
-/// # Safety
-///
-/// It is up to the caller to guarantee that the `MaybeUninit<T>` elements
-/// really are in an initialized state.
-/// Calling this when the content is not yet fully initialized causes undefined behavior.
-#[inline]
-const unsafe fn slice_assume_init_ref<T>(slice: &[MaybeUninit<T>]) -> &[T] {
-    &*(slice as *const _ as *const [T])
-}
-
-/// Assuming all the elements are initialized, get a mutable slice to them.
-///
-/// # Safety
-///
-/// It is up to the caller to guarantee that the `MaybeUninit<T>` elements
-/// really are in an initialized state.
-/// Calling this when the content is not yet fully initialized causes undefined behavior.
-#[inline]
-unsafe fn slice_assume_init_mut<T>(slice: &mut [MaybeUninit<T>]) -> &mut [T] {
-    &mut *(slice as *mut _ as *mut [T])
-}
-
 /// A fixed size array that contains a C string and can be borrowed as a `&str`
 /// using [`as_str`] (for UTF-8 strings) or [`as_ascii_str`].
 ///
@@ -375,49 +164,87 @@ pub struct StringBuf<const N: usize>(pub [u8; N]);
 
 impl<const N: usize> StringBuf<N> {
     /// Finds out the length of the contained string and returns it as a string
-    /// slice.
+    /// slice. Returns `Ok(None)` if no NUL byte is found.
     ///
     /// # Errors
     ///
     /// Fails if the string is not valid UTF-8 (Unicode).
-    #[inline]
-    pub fn as_str(&self) -> Result<&str, Utf8Error> {
-        core::str::from_utf8(get_c_str_slice(&self.0))
+    pub fn as_str(&self) -> Result<Option<&str>, Utf8Error> {
+        Ok(if let Some(s) = get_c_str_slice(&self.0) {
+            Some(core::str::from_utf8(s)?)
+        } else {
+            None
+        })
     }
 
     /// Finds out the length of the contained string and returns it as a mutable
-    /// string slice.
+    /// string slice. Returns `Ok(None)` if no NUL byte is found.
     ///
     /// # Errors
     ///
     /// Fails if the string is not valid UTF-8 (Unicode).
-    #[inline]
-    pub fn as_mut_str(&mut self) -> Result<&mut str, Utf8Error> {
-        core::str::from_utf8_mut(get_c_str_slice_mut(&mut self.0))
+    pub fn as_mut_str(&mut self) -> Result<Option<&mut str>, Utf8Error> {
+        Ok(if let Some(s) = get_c_str_slice_mut(&mut self.0) {
+            Some(core::str::from_utf8_mut(s)?)
+        } else {
+            None
+        })
+    }
+
+    /// Finds out the length of the contained string and returns it as an ASCII
+    /// string slice. Returns `Ok(None)` if no NUL byte is found.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the string is not valid ASCII. Checking this is cheaper than
+    /// checking for a valid UTF-8 string.
+    pub fn as_ascii_str(&self) -> Result<Option<&AsciiStr>, AsAsciiStrError> {
+        Ok(if let Some(s) = get_c_str_slice(&self.0) {
+            Some(s.as_ascii_str()?)
+        } else {
+            None
+        })
+    }
+
+    /// Finds out the length of the contained string and returns it as a mutable
+    /// ASCII string slice. Returns `Ok(None)` if no NUL byte is found.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the string is not valid ASCII. Checking this is cheaper than
+    /// checking for a valid UTF-8 string.
+    pub fn as_mut_ascii_str(&mut self) -> Result<Option<&mut AsciiStr>, AsAsciiStrError> {
+        Ok(if let Some(s) = get_c_str_slice_mut(&mut self.0) {
+            Some(s.as_mut_ascii_str()?)
+        } else {
+            None
+        })
     }
 
     /// Finds out the length of the contained string and returns it as a string
-    /// slice.
+    /// slice. Returns `Ok(None)` if no NUL byte is found.
     ///
     /// # Errors
     ///
     /// Fails if the string is not valid ASCII. Checking this is cheaper than
     /// checking for a valid UTF-8 string.
-    #[inline]
-    pub fn as_ascii_str(&self) -> Result<&str, AsciiError> {
-        str_from_ascii(get_c_str_slice(&self.0))
+    pub fn as_str_check_ascii(&self) -> Result<Option<&str>, AsAsciiStrError> {
+        Ok(self.as_ascii_str()?.map(AsciiStr::as_str))
     }
 
     /// Finds out the length of the contained string and returns it as a mutable
-    /// string slice.
+    /// string slice. Returns `Ok(None)` if no NUL byte is found.
     ///
     /// # Errors
     ///
     /// Fails if the string is not valid ASCII. Checking this is cheaper than
     /// checking for a valid UTF-8 string.
-    #[inline]
-    pub fn as_mut_ascii_str(&mut self) -> Result<&mut str, AsciiError> {
-        str_from_ascii_mut(get_c_str_slice_mut(&mut self.0))
+    #[allow(clippy::cast_ref_to_mut)]
+    pub fn as_mut_str_check_ascii(&mut self) -> Result<Option<&mut str>, AsAsciiStrError> {
+        // Safety: The input slice was also mutable.
+        Ok(self
+            .as_str_check_ascii()?
+            .map(|s| unsafe { &mut *(s as *const _ as *mut _) }))
     }
 }
 
@@ -433,60 +260,36 @@ impl<const N: usize> Debug for StringBuf<N> {
     }
 }
 
-/// The contained characters that are invalid in ASCII strings.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct AsciiError;
-
-impl Display for AsciiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("invalid ascii string")
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for AsciiError {}
-
-impl From<AsciiError> for crate::Error {
-    #[inline]
-    fn from(err: AsciiError) -> Self {
-        Self::Ascii(err)
-    }
-}
-
 /// Finds the first NUL byte and returns a slice containing everything up to
-/// that.
-pub fn get_c_str_slice(buf: &[u8]) -> &[u8] {
-    let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-    // Safety: len <= buf.len().
-    unsafe { buf.get_unchecked(..len) }
+/// that. Returns `None` if none is found.
+///
+/// # Examples
+///
+/// ```
+/// # use livesplit_extension::util::get_c_str_slice;
+/// let b1 = b"hello\0world";
+/// let b2 = b"nonull";
+/// assert_eq!(get_c_str_slice(b1), Some(b"hello"));
+/// assert_eq!(get_c_str_slice(b2), None);
+/// ```
+pub fn get_c_str_slice(buf: &[u8]) -> Option<&[u8]> {
+    buf.split(|&b| b == AsciiChar::Null as u8).next()
 }
 
 /// Finds the first NUL byte and returns a mutable slice containing everything
-/// up to that.
-pub fn get_c_str_slice_mut(buf: &mut [u8]) -> &mut [u8] {
-    let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-    // Safety: len <= buf.len().
-    unsafe { buf.get_unchecked_mut(..len) }
-}
-
-/// Same as [`core::str::from_utf8`] except it only accepts ASCII strings.
-pub fn str_from_ascii(buf: &[u8]) -> Result<&str, AsciiError> {
-    if buf.is_ascii() {
-        // Safety: UTF-8 is a superset of ASCII.
-        Ok(unsafe { core::str::from_utf8_unchecked(buf) })
-    } else {
-        Err(AsciiError)
-    }
-}
-
-/// Same as [`core::str::from_utf8_mut`] except it only accepts ASCII strings.
-pub fn str_from_ascii_mut(buf: &mut [u8]) -> Result<&mut str, AsciiError> {
-    if buf.is_ascii() {
-        // Safety: UTF-8 is a superset of ASCII.
-        Ok(unsafe { core::str::from_utf8_unchecked_mut(buf) })
-    } else {
-        Err(AsciiError)
-    }
+/// up to that. Returns `None` if none is found.
+///
+/// # Examples
+///
+/// ```
+/// # use livesplit_extension::util::get_c_str_slice_mut;
+/// let mut b1 = *b"hello\0world";
+/// let mut b2 = *b"nonull";
+/// assert_eq!(get_c_str_slice_mut(&mut b1), Some(b"hello"));
+/// assert_eq!(get_c_str_slice_mut(&mut b2), None);
+/// ```
+pub fn get_c_str_slice_mut(buf: &mut [u8]) -> Option<&mut [u8]> {
+    buf.split_mut(|&b| b == AsciiChar::Null as u8).next()
 }
 
 /// Adds the offset to the pointer, returning `None` if the result is a
@@ -502,36 +305,9 @@ pub const fn try_ptr_offset(ptr: NonZeroU64, offset: i64) -> Option<NonZeroU64> 
 ///
 /// Panics if the result is a null-pointer.
 #[inline]
-pub fn ptr_offset(ptr: NonZeroU64, offset: i64) -> NonZeroU64 {
-    NonZeroU64::new(ptr.get().wrapping_add(offset as u64)).expect("offset led to nullptr")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn format() {
-        let mut buf = WriteBuf::<256>::new();
-        buf.write_str("hello,").unwrap();
-        buf.write_char(' ').unwrap();
-        write!(buf, "num: {:#018X}\nstr: {:?}", 10293, "something").unwrap();
-        assert_eq!(
-            buf.as_str(),
-            "hello, num: 0x0000000000002835\nstr: \"something\""
-        );
-        let buf2 = buf.clone();
-        assert_eq!(buf.as_str(), buf2.as_str());
-    }
-
-    #[test]
-    fn too_short() {
-        let mut buf = WriteBuf::<4>::new();
-        buf.write_str("老虎").unwrap_err();
-        assert_eq!(buf.as_str(), "老");
-        let mut buf2 = buf.clone();
-        buf2.write_char('e').unwrap_err();
-        assert_eq!(buf.as_str(), buf2.as_str());
-        buf.write_char('e').unwrap_err();
+pub const fn ptr_offset(ptr: NonZeroU64, offset: i64) -> NonZeroU64 {
+    match NonZeroU64::new(ptr.get().wrapping_add(offset as u64)) {
+        Some(n) => n,
+        None => panic!("offset led to nullptr"),
     }
 }

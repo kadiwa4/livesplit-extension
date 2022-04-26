@@ -5,7 +5,7 @@ use crate::{env, Address, ProcessId};
 /// Represents another process.
 ///
 /// This can be used to read memory from a game, which is useful for auto
-/// splitters. See [`mem`](crate::mem);
+/// splitters. See [module `mem`](crate::mem);
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Process {
     process_id: ProcessId,
@@ -52,6 +52,32 @@ impl Drop for Process {
     fn drop(&mut self) {
         unsafe {
             env::process_detach(self.process_id.into());
+        }
+    }
+}
+
+/// If called with a process, checks if that process is still open, and if not,
+/// sets the `Option` to `None`.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use livesplit_extension::process::{self, Process};
+/// # fn get_state_from_somewhere() -> State { State { process: None } }
+/// struct State {
+///     process: Option<Process>,
+///     // ...
+/// }
+///
+/// // In your loop:
+/// let mut state = get_state_from_somewhere();
+/// process::check(&mut state.process);
+/// ```
+#[inline]
+pub fn check(process_opt: &mut Option<Process>) {
+    if let Some(process) = process_opt {
+        if !process.is_open() {
+            *process_opt = None;
         }
     }
 }
