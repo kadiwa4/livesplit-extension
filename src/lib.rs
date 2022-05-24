@@ -3,7 +3,7 @@
 //!
 //! ```no_run
 //! #[no_mangle]
-//! pub extern "C" fn update() {
+//! extern "C" fn update() {
 //!     // ...
 //! }
 //! ```
@@ -14,8 +14,7 @@
 //! # Examples
 //!
 //! ```ignore
-//! use livesplit_extension::util::SyncRefCell;
-//!
+//! # use livesplit_extension::util::SyncRefCell;
 //! struct State {
 //!     // Persistent variables
 //! }
@@ -31,7 +30,7 @@
 //! }
 //!
 //! #[no_mangle]
-//! pub extern "C" fn update() {
+//! extern "C" fn update() {
 //!     let mut state = STATE.borrow_mut();
 //!     let state = state.get_or_insert_with(init);
 //!
@@ -88,6 +87,9 @@ impl Display for Error {
         }
     }
 }
+
+/// Convenience type definition.
+pub type Result<T, E = Error> = core::result::Result<T, E>;
 
 #[cfg(all(target_arch = "wasm32", not(feature = "std")))]
 #[panic_handler]
