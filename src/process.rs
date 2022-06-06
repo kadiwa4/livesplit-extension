@@ -1,6 +1,7 @@
 //! Other processes.
 
-use crate::{env, Address, ProcessId};
+use crate::{env, mem::NonNullAddress, ProcessId};
+use core::num::NonZeroU32;
 
 /// Represents another process.
 ///
@@ -17,16 +18,16 @@ impl Process {
     #[must_use = "if unused, the process is immediately detached again"]
     pub fn attach(name: &str) -> Option<Self> {
         let process_id = unsafe { env::process_attach(name.as_ptr(), name.len()) };
+        debug_assert!(process_id <= u32::MAX as u64);
         let process = Self {
-            process_id: ProcessId::new(process_id as u32)?,
+            process_id: ProcessId(NonZeroU32::new(process_id as u32)?),
         };
-
         Some(process)
     }
 
     /// The process ID, or PID for short.
     #[inline]
-    pub const fn id(&self) -> ProcessId {
+    pub fn id(&self) -> ProcessId {
         self.process_id
     }
 
@@ -34,15 +35,15 @@ impl Process {
     /// process and stop using it if this returns `false`.
     #[inline]
     pub fn is_open(&self) -> bool {
-        unsafe { env::process_is_open(self.process_id.into()) }
+        unsafe { env::process_is_open(self.process_id.0.into()) }
     }
 
     /// Gets the address of a module in a process.
     #[inline]
     #[must_use]
-    pub fn get_module(&self, name: &str) -> Option<Address> {
+    pub fn get_module(&self, name: &str) -> Option<NonNullAddress> {
         unsafe {
-            env::process_get_module_address(self.process_id.into(), name.as_ptr(), name.len())
+            env::process_get_module_address(self.process_id.0.into(), name.as_ptr(), name.len())
         }
     }
 }
@@ -51,7 +52,7 @@ impl Drop for Process {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            env::process_detach(self.process_id.into());
+            env::process_detach(self.process_id.0.into());
         }
     }
 }

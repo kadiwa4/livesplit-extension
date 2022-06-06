@@ -49,8 +49,8 @@ pub mod process;
 pub mod util;
 
 use core::{
-    fmt::{Arguments, Display},
-    num::{NonZeroU32, NonZeroU64},
+    fmt::{self, Arguments, Display, Formatter},
+    num::NonZeroU32,
     str::Utf8Error,
 };
 use mem::{NullptrError, ReadMemoryError};
@@ -78,7 +78,7 @@ impl From<Utf8Error> for crate::Error {
 }
 
 impl Display for Error {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::ReadMemory(err) => Display::fmt(err, f),
             Self::Nullptr(err) => Display::fmt(err, f),
@@ -311,8 +311,12 @@ macro_rules! dbg {
     };
 }
 
-pub type ProcessId = NonZeroU32;
-pub type Address = NonZeroU64;
-pub type Address32 = NonZeroU32;
-pub type Address64 = NonZeroU64;
-pub type Offset = i64;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct ProcessId(NonZeroU32);
+
+impl Display for ProcessId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}

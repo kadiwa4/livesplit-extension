@@ -1,6 +1,6 @@
 //! External functions.
 
-use crate::Address;
+use crate::mem::NonNullAddress;
 use core::num::NonZeroU64;
 
 pub mod timer_state {
@@ -29,7 +29,7 @@ extern "C" {
     /// the memory to the buffer given. Returns `false` if this fails.
     pub fn process_read(
         process: NonZeroU64,
-        address: Address,
+        address: NonNullAddress,
         buf_ptr: *mut u8,
         buf_len: usize,
     ) -> bool;
@@ -38,7 +38,7 @@ extern "C" {
         process: NonZeroU64,
         name_ptr: *const u8,
         name_len: usize,
-    ) -> Option<Address>;
+    ) -> Option<NonNullAddress>;
 
     /// Sets the tick rate of the runtime. This influences the amount of
     /// times the `update` function is called per second.

@@ -1,10 +1,7 @@
 //! Useful but unrelated utilities.
 
-use crate::{
-    mem::{FromMemory, MemoryReader, ReadMemoryError},
-    Address,
-};
-use core::{fmt::Debug, mem::MaybeUninit, num::NonZeroU64, str::Utf8Error};
+use crate::mem::{FromMemory, MemoryReader, NonNullAddress, ReadMemoryError};
+use core::{fmt::Debug, str::Utf8Error};
 
 use ascii::{AsAsciiStr, AsAsciiStrError, AsMutAsciiStr, AsciiChar, AsciiStr};
 
@@ -133,24 +130,6 @@ mod wasm {
 #[cfg(target_arch = "wasm32")]
 pub use wasm::*;
 
-/// Create a new array of `MaybeUninit<T>` items, in an uninitialized state.
-#[inline]
-pub(crate) fn uninit_array<T, const N: usize>() -> [MaybeUninit<T>; N] {
-    // Safety: An uninitialized [MaybeUninit<_>; N] is valid.
-    unsafe { MaybeUninit::<[MaybeUninit<T>; N]>::uninit().assume_init() }
-}
-
-/// Extracts the values from an array of `MaybeUninit` containers.
-///
-/// # Safety
-///
-/// It is up to the caller to guarantee that all elements of the array are
-/// in an initialized state.
-#[inline]
-pub(crate) unsafe fn array_assume_init<T, const N: usize>(array: [MaybeUninit<T>; N]) -> [T; N] {
-    (&array as *const [_; N] as *const [T; N]).read()
-}
-
 /// A string that is stored as a raw byte slice.
 pub trait RawString {
     /// Finds out the length of the contained string and returns it as a raw byte
@@ -261,7 +240,7 @@ pub struct StringBuf<const N: usize>(pub [u8; N]);
 impl<const N: usize> FromMemory for StringBuf<N> {
     type Error = ReadMemoryError;
 
-    fn read_from(reader: &MemoryReader<'_>, addr: Address) -> Result<Self, Self::Error> {
+    fn read_from(reader: &MemoryReader<'_>, addr: NonNullAddress) -> Result<Self, Self::Error> {
         <[u8; N]>::read_from(reader, addr).map(StringBuf)
     }
 }
@@ -279,9 +258,8 @@ impl<const N: usize> RawString for StringBuf<N> {
 #[cfg(feature = "alloc")]
 mod dynamic_string {
     use crate::{
-        mem::{FromMemory, MemoryReader, ReadMemoryError},
+        mem::{FromMemory, MemoryReader, NonNullAddress, ReadMemoryError},
         util::{get_c_str_slice, RawString},
-        Address,
     };
     use alloc::{boxed::Box, vec::Vec};
 
@@ -299,7 +277,7 @@ mod dynamic_string {
     impl FromMemory for DynamicString {
         type Error = ReadMemoryError;
 
-        fn read_from(reader: &MemoryReader<'_>, addr: Address) -> Result<Self, Self::Error> {
+        fn read_from(reader: &MemoryReader<'_>, addr: NonNullAddress) -> Result<Self, Self::Error> {
             let mut vec = Vec::new();
             let mut buf;
 
@@ -371,24 +349,4 @@ pub fn get_c_str_slice_mut(buf: &mut [u8]) -> Option<&mut [u8]> {
     buf.iter()
         .position(|&b| b == AsciiChar::Null as u8)
         .and_then(|p| buf.get_mut(..p))
-}
-
-/// Adds the offset to the pointer, returning `None` if the result is a
-/// null-pointer.
-#[inline]
-pub const fn try_ptr_offset(ptr: NonZeroU64, offset: i64) -> Option<NonZeroU64> {
-    NonZeroU64::new(ptr.get().wrapping_add(offset as u64))
-}
-
-/// Adds the offset to the pointer.
-///
-/// # Panics
-///
-/// Panics if the result is a null-pointer.
-#[inline]
-pub const fn ptr_offset(ptr: NonZeroU64, offset: i64) -> NonZeroU64 {
-    match NonZeroU64::new(ptr.get().wrapping_add(offset as u64)) {
-        Some(n) => n,
-        None => panic!("offset led to nullptr"),
-    }
 }

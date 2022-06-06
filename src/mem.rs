@@ -1,11 +1,107 @@
 //! Operations on a [`Process`]'s memory.
 
-use crate::{env, process::Process, util, Address, Address32, Address64, Offset, ProcessId};
+use crate::{env, process::Process, ProcessId};
 use core::{
     any::TypeId,
     fmt::{self, Debug, Display, Formatter},
     marker::PhantomData,
+    mem::MaybeUninit,
+    num::NonZeroU64,
+    ops::{Add, AddAssign, Sub},
 };
+
+pub type Offset = i64;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct Address(pub u64);
+
+impl Display for Address {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{:018X}", self.0)
+    }
+}
+
+impl From<NonNullAddress> for Address {
+    #[inline]
+    fn from(addr: NonNullAddress) -> Self {
+        Self(addr.0.get())
+    }
+}
+
+impl Add<Offset> for Address {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, rhs: Offset) -> Self::Output {
+        Self(u64::wrapping_add(self.0, rhs as u64))
+    }
+}
+
+impl AddAssign<Offset> for Address {
+    #[inline]
+    fn add_assign(&mut self, rhs: Offset) {
+        self.0 = u64::wrapping_add(self.0, rhs as u64);
+    }
+}
+
+impl Sub for Address {
+    type Output = Offset;
+
+    #[inline]
+    fn sub(self, rhs: Self) -> Self::Output {
+        u64::wrapping_sub(self.0, rhs.0) as i64
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct NonNullAddress(pub NonZeroU64);
+
+impl NonNullAddress {
+    #[inline]
+    pub fn new(addr: Address) -> Option<Self> {
+        Some(Self(NonZeroU64::new(addr.0)?))
+    }
+}
+
+impl Display for NonNullAddress {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{:018X}", self.0.get())
+    }
+}
+
+impl Add<Offset> for NonNullAddress {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, rhs: Offset) -> Self::Output {
+        let p = NonZeroU64::new(u64::wrapping_add(self.0.get(), rhs as u64))
+            .expect("offset led to nullptr");
+        Self(p)
+    }
+}
+
+impl AddAssign<Offset> for NonNullAddress {
+    /// Performs the `+=` operation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the result is a null pointer.
+    #[inline]
+    fn add_assign(&mut self, rhs: Offset) {
+        *self = *self + rhs
+    }
+}
+
+impl Sub for NonNullAddress {
+    type Output = Offset;
+
+    #[inline]
+    fn sub(self, rhs: Self) -> Self::Output {
+        u64::wrapping_sub(self.0.get(), rhs.0.get()) as i64
+    }
+}
 
 /// The order in which multi-byte integers (such as `u16`, `u32`, …) are stored.
 ///
@@ -69,19 +165,19 @@ pub trait FromMemory: 'static + Clone {
 
     /// Reads memory from a process at the given address and returns it as a
     /// specific type. The [`MemoryReader`]'s `base` address is ignored.
-    fn read_from(reader: &MemoryReader<'_>, addr: Address) -> Result<Self, Self::Error>;
+    fn read_from(reader: &MemoryReader<'_>, addr: NonNullAddress) -> Result<Self, Self::Error>;
 }
 
 impl<const N: usize> FromMemory for [u8; N] {
     type Error = ReadMemoryError;
 
-    fn read_from(reader: &MemoryReader<'_>, addr: Address) -> Result<Self, Self::Error> {
-        let mut buf = util::uninit_array::<u8, N>();
+    fn read_from(reader: &MemoryReader<'_>, addr: NonNullAddress) -> Result<Self, Self::Error> {
+        let mut buf = MaybeUninit::<[u8; N]>::uninit();
         unsafe {
-            reader.read_raw(addr, buf.as_mut_ptr().cast(), buf.len())?;
+            reader.read_raw(addr, buf.as_mut_ptr().cast(), N)?;
         }
 
-        Ok(unsafe { util::array_assume_init(buf) })
+        Ok(unsafe { buf.assume_init() })
     }
 }
 
@@ -90,7 +186,7 @@ macro_rules! int_from_memory_impl {
         impl FromMemory for $t {
             type Error = ReadMemoryError;
 
-            fn read_from(reader: &MemoryReader<'_>, addr: Address) -> Result<Self, Self::Error> {
+            fn read_from(reader: &MemoryReader<'_>, addr: NonNullAddress) -> Result<Self, Self::Error> {
                 let val = Self::from_ne_bytes(FromMemory::read_from(reader, addr)?);
 
                 Ok(match reader.endian {
@@ -104,24 +200,23 @@ macro_rules! int_from_memory_impl {
 
 int_from_memory_impl!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128);
 
-impl FromMemory for Address32 {
-    type Error = ReadPtrError;
+impl FromMemory for Address {
+    type Error = ReadMemoryError;
 
-    fn read_from(reader: &MemoryReader<'_>, addr: Address) -> Result<Self, Self::Error> {
-        Self::new(u32::read_from(reader, addr)?).ok_or_else(|| {
-            ReadPtrError::Nullptr(NullptrError {
-                process_id: reader.process.id(),
-                address: addr,
-            })
-        })
+    fn read_from(reader: &MemoryReader<'_>, addr: NonNullAddress) -> Result<Self, Self::Error> {
+        let p = match reader.ptr_width {
+            PtrWidth::U32 => u32::read_from(reader, addr)? as u64,
+            PtrWidth::U64 => u64::read_from(reader, addr)?,
+        };
+        Ok(Self(p))
     }
 }
 
-impl FromMemory for Address64 {
+impl FromMemory for NonNullAddress {
     type Error = ReadPtrError;
 
-    fn read_from(reader: &MemoryReader<'_>, addr: Address) -> Result<Self, Self::Error> {
-        Self::new(u64::read_from(reader, addr)?).ok_or_else(|| {
+    fn read_from(reader: &MemoryReader<'_>, addr: NonNullAddress) -> Result<Self, Self::Error> {
+        Self::new(Address::read_from(reader, addr)?).ok_or_else(|| {
             ReadPtrError::Nullptr(NullptrError {
                 process_id: reader.process.id(),
                 address: addr,
@@ -133,7 +228,7 @@ impl FromMemory for Address64 {
 impl FromMemory for bool {
     type Error = ReadMemoryError;
 
-    fn read_from(reader: &MemoryReader<'_>, addr: Address) -> Result<Self, Self::Error> {
+    fn read_from(reader: &MemoryReader<'_>, addr: NonNullAddress) -> Result<Self, Self::Error> {
         <[u8; 1]>::read_from(reader, addr).map(|[n]| n != 0)
     }
 }
@@ -147,7 +242,7 @@ impl FromMemory for bool {
 #[derive(Clone, Copy, Debug)]
 pub struct ReadMemoryError {
     process_id: ProcessId,
-    address: Address,
+    address: NonNullAddress,
     len: usize,
 }
 
@@ -163,7 +258,7 @@ impl Display for ReadMemoryError {
         } = self;
         write!(
             f,
-            "failed reading {len} bytes of memory from process {process_id} at {address:018X}"
+            "failed reading {len} bytes of memory from process {process_id} at {address}"
         )
     }
 }
@@ -183,7 +278,7 @@ impl From<ReadMemoryError> for crate::Error {
 #[derive(Clone, Copy, Debug)]
 pub struct NullptrError {
     process_id: ProcessId,
-    address: Address,
+    address: NonNullAddress,
 }
 
 #[cfg(feature = "std")]
@@ -197,7 +292,7 @@ impl Display for NullptrError {
         } = self;
         write!(
             f,
-            "found null pointer while reading from process {process_id} at {address:018X}"
+            "found null pointer while reading from process {process_id} at {address}"
         )
     }
 }
@@ -265,14 +360,14 @@ pub struct MemoryReader<'a> {
     pub ptr_width: PtrWidth,
     /// The base address. Consider using [`Process::get_module`] to get this
     /// value.
-    pub base: Address,
+    pub base: NonNullAddress,
 }
 
 impl<'a> MemoryReader<'a> {
     /// In most cases, you want little endian, 64-bit pointers.
     /// This is a convenience function that uses those default settings.
     #[inline]
-    pub const fn new_default(process: &'a Process, base: Address) -> Self {
+    pub const fn new_default(process: &'a Process, base: NonNullAddress) -> Self {
         Self {
             process,
             endian: Endianness::Le,
@@ -281,23 +376,16 @@ impl<'a> MemoryReader<'a> {
         }
     }
 
-    /// Reads memory from a process at the given address and writes it to the
-    /// buffer. The [`MemoryReader`]'s `base` address is ignored. The buffer
-    /// will not be read.
-    pub fn read_buf(&self, addr: Address, buf: &mut [u8]) -> Result<(), ReadMemoryError> {
-        unsafe { self.read_raw(addr, buf.as_mut_ptr(), buf.len()) }
-    }
-
     /// # Safety
     ///
     /// The pointer has to be valid.
     unsafe fn read_raw(
         &self,
-        addr: Address,
+        addr: NonNullAddress,
         buf_ptr: *mut u8,
         buf_len: usize,
     ) -> Result<(), ReadMemoryError> {
-        let success = env::process_read(self.process.id().into(), addr, buf_ptr, buf_len);
+        let success = env::process_read(self.process.id().0.into(), addr, buf_ptr, buf_len);
         if success {
             Ok(())
         } else {
@@ -309,26 +397,17 @@ impl<'a> MemoryReader<'a> {
         }
     }
 
+    /// Reads memory from a process at the given address and writes it to the
+    /// buffer. The [`MemoryReader`]'s `base` address is ignored. The buffer
+    /// will not be read.
+    pub fn read_buf(&self, addr: NonNullAddress, buf: &mut [u8]) -> Result<(), ReadMemoryError> {
+        unsafe { self.read_raw(addr, buf.as_mut_ptr(), buf.len()) }
+    }
+
     /// Reads memory from a process at the given address and returns it as a
     /// specific type. The [`MemoryReader`]'s `base` address is ignored.
-    pub fn read<T: FromMemory>(&self, addr: Address) -> Result<T, T::Error> {
+    pub fn read<T: FromMemory>(&self, addr: NonNullAddress) -> Result<T, T::Error> {
         T::read_from(self, addr)
-    }
-
-    /// Reads memory from a process at the given address as an [`Address32`] or
-    /// [`Address64`] and returns it as an [`Address`]. The [`MemoryReader`]'s
-    /// `base` address is ignored.
-    pub fn read_ptr(&self, addr: Address) -> Result<Address, ReadPtrError> {
-        match self.ptr_width {
-            PtrWidth::U32 => Ok(Address32::read_from(self, addr)?.into()),
-            PtrWidth::U64 => Address64::read_from(self, addr),
-        }
-    }
-
-    /// Reads memory from a process at the given address and returns it as an
-    /// array. The [`MemoryReader`]'s `base` address is ignored.
-    pub fn read_array<const N: usize>(&self, addr: Address) -> Result<[u8; N], ReadMemoryError> {
-        <[u8; N]>::read_from(self, addr)
     }
 }
 
@@ -440,7 +519,7 @@ impl<T: FromMemory> Eq for PtrPath<'_, T> {}
 pub struct PtrPathWalker<'a, T> {
     path: PtrPath<'a, T>,
     pub reader: MemoryReader<'a>,
-    current: Address,
+    current: NonNullAddress,
     depth: usize,
 }
 
@@ -453,7 +532,7 @@ impl<'a, T> PtrPathWalker<'a, T> {
 
     /// The current pointer (without an offset).
     #[inline]
-    pub fn current_ptr(&self) -> Address {
+    pub fn current_address(&self) -> NonNullAddress {
         self.current
     }
 
@@ -483,9 +562,9 @@ impl<'a, T> PtrPathWalker<'a, T> {
     pub fn advance(&mut self) -> Result<Option<PtrPathEnd<'a, T>>, ReadPtrError> {
         if let Some(offset) = self.path.offsets.get(self.depth) {
             self.depth += 1;
-            self.current = util::ptr_offset(self.current, *offset);
+            self.current += *offset;
             if self.depth != self.path.offsets.len() {
-                self.current = self.reader.read_ptr(self.current)?;
+                self.current = self.reader.read(self.current)?;
                 return Ok(None);
             }
         }
@@ -550,7 +629,7 @@ impl<T> Debug for PtrPathWalker<'_, T> {
 /// read more than once but it might become invalid if the pointer path changes.
 pub struct PtrPathEnd<'a, T> {
     pub reader: MemoryReader<'a>,
-    addr: Address,
+    addr: NonNullAddress,
     // This struct is invariant over T.
     _marker: PhantomData<fn(T) -> T>,
 }
@@ -559,7 +638,7 @@ impl<T> PtrPathEnd<'_, T> {
     /// The final pointer of a [`PtrPath`]. It can be read from more
     /// than once but it might become invalid if the pointer path changes.
     #[inline]
-    pub fn address(&self) -> Address {
+    pub fn address(&self) -> NonNullAddress {
         self.addr
     }
 }
@@ -569,13 +648,6 @@ impl<T: FromMemory> PtrPathEnd<'_, T> {
     /// than once but it might become invalid if the pointer path changes.
     pub fn read(&self) -> Result<T, T::Error> {
         T::read_from(&self.reader, self.addr)
-    }
-
-    /// Reads the value at the end of the [`PtrPath`] as an [`Address32`] or
-    /// [`Address64`] and returns it as an [`Address`]. It can be read more than
-    /// once but it might become invalid if the pointer path changes.
-    pub fn read_ptr(&self) -> Result<Address, ReadPtrError> {
-        self.reader.read_ptr(self.addr)
     }
 }
 
