@@ -14,7 +14,6 @@ pub struct Process {
 
 impl Process {
     /// Attaches to a process based on its name.
-    #[inline]
     #[must_use = "if unused, the process is immediately detached again"]
     pub fn attach(name: &str) -> Option<Self> {
         let process_id = unsafe { env::process_attach(name.as_ptr(), name.len()) };
@@ -26,20 +25,17 @@ impl Process {
     }
 
     /// The process ID, or PID for short.
-    #[inline]
     pub fn id(&self) -> ProcessId {
         self.process_id
     }
 
     /// Checks whether is a process is still open. You should detach from a
     /// process and stop using it if this returns `false`.
-    #[inline]
     pub fn is_open(&self) -> bool {
         unsafe { env::process_is_open(self.process_id.0.into()) }
     }
 
     /// Gets the address of a module in a process.
-    #[inline]
     #[must_use]
     pub fn get_module(&self, name: &str) -> Option<NonNullAddress> {
         unsafe {
@@ -49,7 +45,6 @@ impl Process {
 }
 
 impl Drop for Process {
-    #[inline]
     fn drop(&mut self) {
         unsafe {
             env::process_detach(self.process_id.0.into());
@@ -74,7 +69,6 @@ impl Drop for Process {
 /// let mut state = get_state_from_somewhere();
 /// process::check(&mut state.process);
 /// ```
-#[inline]
 pub fn check(process_opt: &mut Option<Process>) {
     if let Some(process) = process_opt {
         if !process.is_open() {

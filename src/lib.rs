@@ -71,7 +71,6 @@ pub enum Error {
 impl std::error::Error for Error {}
 
 impl From<Utf8Error> for crate::Error {
-    #[inline]
     fn from(err: Utf8Error) -> Self {
         Self::Utf8(err)
     }
@@ -116,7 +115,6 @@ pub mod runtime {
 
     /// Sets the tick rate of the runtime. This influences the amount of
     /// times the `update` function is called per second.
-    #[inline]
     pub fn set_tick_rate(ticks_per_second: f64) {
         unsafe {
             env::runtime_set_tick_rate(ticks_per_second);
@@ -124,7 +122,6 @@ pub mod runtime {
     }
 
     /// Prints a log message (including a line break) for debugging purposes.
-    #[inline]
     pub fn print_message(text: &str) {
         unsafe {
             env::runtime_print_message(text.as_ptr(), text.len());
@@ -188,7 +185,6 @@ pub mod timer {
     }
 
     /// Starts the timer.
-    #[inline]
     pub fn start() {
         unsafe {
             env::timer_start();
@@ -196,7 +192,6 @@ pub mod timer {
     }
 
     /// Splits the current segment.
-    #[inline]
     pub fn split() {
         unsafe {
             env::timer_split();
@@ -204,7 +199,6 @@ pub mod timer {
     }
 
     /// Resets the timer.
-    #[inline]
     pub fn reset() {
         unsafe {
             env::timer_reset();
@@ -213,7 +207,6 @@ pub mod timer {
 
     /// Sets a custom key value pair. This may be arbitrary information that
     /// the auto splitter wants to provide for visualization.
-    #[inline]
     pub fn set_variable(key: &str, value: &str) {
         unsafe {
             env::timer_set_variable(key.as_ptr(), key.len(), value.as_ptr(), value.len());
@@ -221,7 +214,6 @@ pub mod timer {
     }
 
     /// Sets the game time.
-    #[inline]
     pub fn set_game_time(secs: i64, nanos: i32) {
         unsafe {
             env::timer_set_game_time(secs, nanos);
@@ -230,7 +222,6 @@ pub mod timer {
 
     /// Pauses the game time. This does not pause the timer, only the
     /// automatic flow of time for the game time.
-    #[inline]
     pub fn pause_game_time() {
         unsafe {
             env::timer_pause_game_time();
@@ -239,7 +230,6 @@ pub mod timer {
 
     /// Resumes the game time. This does not resume the timer, only the
     /// automatic flow of time for the game time.
-    #[inline]
     pub fn resume_game_time() {
         unsafe {
             env::timer_resume_game_time();

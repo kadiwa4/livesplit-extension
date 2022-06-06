@@ -22,14 +22,12 @@ mod wasm {
     pub struct SyncCell<T: ?Sized>(pub Cell<T>);
 
     impl<T> SyncCell<T> {
-        #[inline]
         pub const fn new(v: T) -> Self {
             Self(Cell::new(v))
         }
     }
 
     impl<T: Copy> Clone for SyncCell<T> {
-        #[inline]
         fn clone(&self) -> Self {
             Self(Cell::new(self.0.get()))
         }
@@ -44,7 +42,6 @@ mod wasm {
     impl<T> Deref for SyncCell<T> {
         type Target = Cell<T>;
 
-        #[inline]
         fn deref(&self) -> &Self::Target {
             &self.0
         }
@@ -71,14 +68,12 @@ mod wasm {
     }
 
     impl<T> From<T> for SyncCell<T> {
-        #[inline]
         fn from(t: T) -> Self {
             Self(Cell::new(t))
         }
     }
 
     impl<T> From<Cell<T>> for SyncCell<T> {
-        #[inline]
         fn from(cell: Cell<T>) -> Self {
             Self(cell)
         }
@@ -94,7 +89,6 @@ mod wasm {
     pub struct SyncRefCell<T: ?Sized>(pub RefCell<T>);
 
     impl<T> SyncRefCell<T> {
-        #[inline]
         pub const fn new(v: T) -> Self {
             Self(RefCell::new(v))
         }
@@ -103,21 +97,18 @@ mod wasm {
     impl<T> Deref for SyncRefCell<T> {
         type Target = RefCell<T>;
 
-        #[inline]
         fn deref(&self) -> &Self::Target {
             &self.0
         }
     }
 
     impl<T> From<T> for SyncRefCell<T> {
-        #[inline]
         fn from(t: T) -> Self {
             Self(RefCell::new(t))
         }
     }
 
     impl<T> From<RefCell<T>> for SyncRefCell<T> {
-        #[inline]
         fn from(cell: RefCell<T>) -> Self {
             Self(cell)
         }
@@ -297,13 +288,11 @@ mod dynamic_string {
 
     impl RawString for DynamicString {
         /// Returns the contained byte slice.
-        #[inline]
         fn as_bytes(&self) -> Option<&[u8]> {
             Some(&self.bytes)
         }
 
         /// Returns the contained byte slice.
-        #[inline]
         fn as_mut_bytes(&mut self) -> Option<&mut [u8]> {
             Some(&mut self.bytes)
         }

@@ -23,7 +23,6 @@ impl Display for Address {
 }
 
 impl From<NonNullAddress> for Address {
-    #[inline]
     fn from(addr: NonNullAddress) -> Self {
         Self(addr.0.get())
     }
@@ -32,14 +31,12 @@ impl From<NonNullAddress> for Address {
 impl Add<Offset> for Address {
     type Output = Self;
 
-    #[inline]
     fn add(self, rhs: Offset) -> Self::Output {
         Self(u64::wrapping_add(self.0, rhs as u64))
     }
 }
 
 impl AddAssign<Offset> for Address {
-    #[inline]
     fn add_assign(&mut self, rhs: Offset) {
         self.0 = u64::wrapping_add(self.0, rhs as u64);
     }
@@ -48,7 +45,6 @@ impl AddAssign<Offset> for Address {
 impl Sub for Address {
     type Output = Offset;
 
-    #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
         u64::wrapping_sub(self.0, rhs.0) as i64
     }
@@ -59,7 +55,6 @@ impl Sub for Address {
 pub struct NonNullAddress(pub NonZeroU64);
 
 impl NonNullAddress {
-    #[inline]
     pub fn new(addr: Address) -> Option<Self> {
         Some(Self(NonZeroU64::new(addr.0)?))
     }
@@ -74,7 +69,6 @@ impl Display for NonNullAddress {
 impl Add<Offset> for NonNullAddress {
     type Output = Self;
 
-    #[inline]
     fn add(self, rhs: Offset) -> Self::Output {
         let p = NonZeroU64::new(u64::wrapping_add(self.0.get(), rhs as u64))
             .expect("offset led to nullptr");
@@ -88,7 +82,6 @@ impl AddAssign<Offset> for NonNullAddress {
     /// # Panics
     ///
     /// Panics if the result is a null pointer.
-    #[inline]
     fn add_assign(&mut self, rhs: Offset) {
         *self = *self + rhs
     }
@@ -97,7 +90,6 @@ impl AddAssign<Offset> for NonNullAddress {
 impl Sub for NonNullAddress {
     type Output = Offset;
 
-    #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
         u64::wrapping_sub(self.0.get(), rhs.0.get()) as i64
     }
@@ -118,7 +110,6 @@ pub enum Endianness {
 }
 
 impl Default for Endianness {
-    #[inline]
     fn default() -> Self {
         Self::Le
     }
@@ -148,7 +139,6 @@ pub enum PtrWidth {
 }
 
 impl Default for PtrWidth {
-    #[inline]
     fn default() -> Self {
         Self::U64
     }
@@ -264,7 +254,6 @@ impl Display for ReadMemoryError {
 }
 
 impl From<ReadMemoryError> for crate::Error {
-    #[inline]
     fn from(err: ReadMemoryError) -> Self {
         Self::ReadMemory(err)
     }
@@ -298,7 +287,6 @@ impl Display for NullptrError {
 }
 
 impl From<NullptrError> for crate::Error {
-    #[inline]
     fn from(err: NullptrError) -> Self {
         Self::Nullptr(err)
     }
@@ -326,21 +314,18 @@ impl Display for ReadPtrError {
 }
 
 impl From<ReadMemoryError> for ReadPtrError {
-    #[inline]
     fn from(err: ReadMemoryError) -> Self {
         Self::ReadMemory(err)
     }
 }
 
 impl From<NullptrError> for ReadPtrError {
-    #[inline]
     fn from(err: NullptrError) -> Self {
         Self::Nullptr(err)
     }
 }
 
 impl From<ReadPtrError> for crate::Error {
-    #[inline]
     fn from(err: ReadPtrError) -> Self {
         match err {
             ReadPtrError::ReadMemory(err) => Self::ReadMemory(err),
@@ -366,7 +351,6 @@ pub struct MemoryReader<'a> {
 impl<'a> MemoryReader<'a> {
     /// In most cases, you want little endian, 64-bit pointers.
     /// This is a convenience function that uses those default settings.
-    #[inline]
     pub const fn new_default(process: &'a Process, base: NonNullAddress) -> Self {
         Self {
             process,
@@ -455,7 +439,6 @@ impl<'a, T> PtrPath<'a, T> {
     /// # use livesplit_extension::mem::PtrPath;
     /// const IS_LOADING: PtrPath<'_, bool> = PtrPath::new(&[0x04BA9DC8, 0x48, 0, 0x6]);
     /// ```
-    #[inline]
     pub const fn new(offsets: &'a [Offset]) -> Self
     where
         T: FromMemory,
@@ -466,7 +449,6 @@ impl<'a, T> PtrPath<'a, T> {
         }
     }
 
-    #[inline]
     pub fn walker(self, reader: MemoryReader<'a>) -> PtrPathWalker<'a, T> {
         PtrPathWalker {
             path: self,
@@ -482,7 +464,6 @@ impl<'a, T> PtrPath<'a, T> {
 }
 
 impl<T> Clone for PtrPath<'_, T> {
-    #[inline]
     fn clone(&self) -> Self {
         *self
     }
@@ -502,7 +483,6 @@ where
     T: FromMemory,
     U: FromMemory,
 {
-    #[inline]
     fn eq(&self, other: &PtrPath<'_, U>) -> bool {
         TypeId::of::<T>() == TypeId::of::<U>() && self.offsets == other.offsets
     }
@@ -525,33 +505,28 @@ pub struct PtrPathWalker<'a, T> {
 
 impl<'a, T> PtrPathWalker<'a, T> {
     /// The whole pointer path that this is walking.
-    #[inline]
     pub fn path(&self) -> PtrPath<'a, T> {
         self.path
     }
 
     /// The current pointer (without an offset).
-    #[inline]
     pub fn current_address(&self) -> NonNullAddress {
         self.current
     }
 
     /// Indicates how far the path has been walked. Always less than or equal to
     /// `offsets.len()`. This is the same as `walked_offsets().len()`.
-    #[inline]
     pub fn current_depth(&self) -> usize {
         self.depth
     }
 
     /// The pointer path offsets that have been applied so far.
-    #[inline]
     pub fn walked_offsets(&self) -> &[Offset] {
         // Safety: depth <= offsets.len().
         unsafe { self.path.offsets.get_unchecked(..self.depth) }
     }
 
     /// The pointer path offsets that have not been applied yet.
-    #[inline]
     pub fn remaining_offsets(&self) -> &[Offset] {
         // Safety: depth <= offsets.len().
         unsafe { self.path.offsets.get_unchecked(self.depth..) }
@@ -608,7 +583,6 @@ impl<'a, T> PtrPathWalker<'a, T> {
 }
 
 impl<T> Clone for PtrPathWalker<'_, T> {
-    #[inline]
     fn clone(&self) -> Self {
         Self { ..*self }
     }
@@ -637,7 +611,6 @@ pub struct PtrPathEnd<'a, T> {
 impl<T> PtrPathEnd<'_, T> {
     /// The final pointer of a [`PtrPath`]. It can be read from more
     /// than once but it might become invalid if the pointer path changes.
-    #[inline]
     pub fn address(&self) -> NonNullAddress {
         self.addr
     }
@@ -652,7 +625,6 @@ impl<T: FromMemory> PtrPathEnd<'_, T> {
 }
 
 impl<T> Clone for PtrPathEnd<'_, T> {
-    #[inline]
     fn clone(&self) -> Self {
         *self
     }
